@@ -30,7 +30,10 @@ export class RiskComplianceEngine {
         }
 
         // Normalize amount to USD for consistent AML rule checking
-        const txCurrency = (tx.currency || 'USD').toUpperCase();
+        const txCurrency = (tx.currency || '').toUpperCase();
+        if (!txCurrency) {
+            throw new Error('CURRENCY_REQUIRED: Transaction currency is required for AML checks.');
+        }
         const amountInUSD = await FXEngine.convertToUSD(tx.amount, txCurrency);
 
         // Rule 1: High value transaction (Normalized to USD)
@@ -66,7 +69,11 @@ export class RiskComplianceEngine {
                     // Check cumulative volume in USD
                     let volumeUSD = 0;
                     for (const rTx of recentTxs) {
-                        volumeUSD += await FXEngine.convertToUSD(Number(rTx.amount || 0), rTx.currency || 'USD');
+                        const relatedCurrency = (rTx.currency || '').toUpperCase();
+                        if (!relatedCurrency) {
+                            throw new Error('CURRENCY_REQUIRED: Historical transaction currency is required for AML checks.');
+                        }
+                        volumeUSD += await FXEngine.convertToUSD(Number(rTx.amount || 0), relatedCurrency);
                     }
                     
                     if (volumeUSD + amountInUSD > 15000) {

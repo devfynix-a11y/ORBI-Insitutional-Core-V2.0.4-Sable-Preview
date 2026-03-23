@@ -96,6 +96,7 @@ export class EnterprisePaymentProcessor {
             const config = await ConfigClient.getRuleConfig();
             
             let kycStatus = user.user_metadata?.kyc_status;
+            let accountCurrency = user.user_metadata?.currency;
             if (!kycStatus) {
                 const sb = getSupabase();
                 // Try admin client first for reliable lookup
@@ -103,9 +104,21 @@ export class EnterprisePaymentProcessor {
                 const client = adminSb || sb;
                 
                 if (client) {
-                    const { data } = await client.from('users').select('kyc_status').eq('id', user.id).maybeSingle();
+                    const { data } = await client
+                        .from('users')
+                        .select('kyc_status, currency')
+                        .eq('id', user.id)
+                        .maybeSingle();
                     kycStatus = data?.kyc_status;
+                    accountCurrency = data?.currency || accountCurrency;
                 }
+            }
+
+            accountCurrency = typeof accountCurrency === 'string'
+                ? accountCurrency.trim().toUpperCase()
+                : '';
+            if (!accountCurrency) {
+                throw new Error("CURRENCY_REQUIRED: Sender account has no assigned currency. Transfers are blocked until the profile is fixed.");
             }
             
             if (kycStatus !== 'verified') {
@@ -436,17 +449,17 @@ export class EnterprisePaymentProcessor {
 
                     if (intent.type === 'DEPOSIT') {
                         msg = isSw 
-                            ? `Ndugu ${userName} umefanikiwa kupokea ${intent.currency || 'Tsh'} ${amountStr}/= kwenye akaunti yako ya ORBI saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
-                            : `Dear ${userName} you have successfully received ${intent.currency || 'Tsh'} ${amountStr}/= on your ORBI account at ${timestamp}. Reference ${refId} . ${footer}`;
+                            ? `Ndugu ${userName} umefanikiwa kupokea ${intent.currency} ${amountStr}/= kwenye akaunti yako ya ORBI saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
+                            : `Dear ${userName} you have successfully received ${intent.currency} ${amountStr}/= on your ORBI account at ${timestamp}. Reference ${refId} . ${footer}`;
                     } else if (intent.type === 'WITHDRAWAL') {
                         msg = isSw
-                            ? `Ndugu ${userName} umefanikiwa kutoa ${intent.currency || 'Tsh'} ${amountStr}/= kutoka kwenye akaunti yako ya ORBI saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
-                            : `Dear ${userName} you have successfully withdrawn ${intent.currency || 'Tsh'} ${amountStr}/= from your ORBI account at ${timestamp}. Reference ${refId} . ${footer}`;
+                            ? `Ndugu ${userName} umefanikiwa kutoa ${intent.currency} ${amountStr}/= kutoka kwenye akaunti yako ya ORBI saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
+                            : `Dear ${userName} you have successfully withdrawn ${intent.currency} ${amountStr}/= from your ORBI account at ${timestamp}. Reference ${refId} . ${footer}`;
                     } else {
                         const typeLabel = isSw ? 'ombi lako' : `your ${intent.type.toLowerCase()} request`;
                         msg = isSw
-                            ? `Ndugu ${userName} ${typeLabel} la ${intent.currency || 'Tsh'} ${amountStr}/= limekamilika kwa mafanikio saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
-                            : `Dear ${userName} ${typeLabel} of ${intent.currency || 'Tsh'} ${amountStr}/= has been processed successfully at ${timestamp}. Reference ${refId} . ${footer}`;
+                            ? `Ndugu ${userName} ${typeLabel} la ${intent.currency} ${amountStr}/= limekamilika kwa mafanikio saa ${timestamp}. Kumbukumbu ${refId} . ${footer}`
+                            : `Dear ${userName} ${typeLabel} of ${intent.currency} ${amountStr}/= has been processed successfully at ${timestamp}. Reference ${refId} . ${footer}`;
                     }
                     
                     // Message to Sender (Debit/Deposit/Withdrawal) via Push & SMS
@@ -513,6 +526,9 @@ export class EnterprisePaymentProcessor {
     private validateIntent(intent: EntPaymentIntent) {
         if (!intent.idempotencyKey) throw new Error("VALIDATION_ERROR: Idempotency key required.");
         if (intent.amount <= 0 || isNaN(intent.amount)) throw new Error("VALIDATION_ERROR: Invalid amount.");
+        if (!intent.currency || !intent.currency.trim()) {
+            throw new Error("CURRENCY_REQUIRED: Transaction currency is required.");
+        }
         if (intent.sourceWalletId && intent.sourceWalletId === intent.targetWalletId) {
             throw new Error("VALIDATION_ERROR: Source and target wallets cannot be the same.");
         }

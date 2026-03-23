@@ -105,7 +105,7 @@ export class TreasuryService {
                                 walletId: operatingVault.id,
                                 type: 'DEBIT' as 'DEBIT',
                                 amount: sweepAmount,
-                                currency: goal.currency || 'USD',
+                                currency: goal.currency,
                                 description: `Auto-Sweep to Treasury: ${goal.name}`,
                                 timestamp: new Date().toISOString()
                             },
@@ -114,7 +114,7 @@ export class TreasuryService {
                                 walletId: goal.id, // Assuming goal acts as a wallet or has a linked wallet
                                 type: 'CREDIT' as 'CREDIT',
                                 amount: sweepAmount,
-                                currency: goal.currency || 'USD',
+                                currency: goal.currency,
                                 description: `Inbound Auto-Sweep from Operating Vault`,
                                 timestamp: new Date().toISOString()
                             }
@@ -274,7 +274,7 @@ export class TreasuryService {
                     walletId: tx.wallet_id,
                     type: 'DEBIT' as 'DEBIT',
                     amount: amount,
-                    currency: tx.currency || 'USD',
+                    currency: tx.currency,
                     description: `Approved Treasury Withdrawal`,
                     timestamp: new Date().toISOString()
                 },
@@ -283,7 +283,7 @@ export class TreasuryService {
                     walletId: tx.to_wallet_id,
                     type: 'CREDIT' as 'CREDIT',
                     amount: amount,
-                    currency: tx.currency || 'USD',
+                    currency: tx.currency,
                     description: `Inbound Treasury Funds`,
                     timestamp: new Date().toISOString()
                 }
@@ -321,7 +321,7 @@ export class TreasuryService {
                     template: 'Treasury_Withdrawal_Approved',
                     variables: {
                         amount: amount.toLocaleString(),
-                        currency: tx.currency || 'TZS'
+                        currency: tx.currency
                     }
                 }
             );

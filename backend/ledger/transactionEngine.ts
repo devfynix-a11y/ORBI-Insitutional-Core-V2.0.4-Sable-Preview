@@ -84,7 +84,7 @@ export class BankingEngineService {
                         type: (type === 'INTERNAL_TRANSFER' || type === 'PEER_TRANSFER') ? 'transfer' : 
                               (type === 'DEPOSIT') ? 'deposit' : 
                               (type === 'WITHDRAWAL') ? 'withdrawal' : 'expense',
-                        currency: currency || intent.currency || 'USD',
+                        currency: currency || intent.currency,
                         status: initialStatus,
                         status_history: [
                             { status: 'created', timestamp },
@@ -159,7 +159,7 @@ export class BankingEngineService {
                 type: (type === 'INTERNAL_TRANSFER' || type === 'PEER_TRANSFER') ? 'transfer' : 
                       (type === 'DEPOSIT') ? 'deposit' : 
                       (type === 'WITHDRAWAL') ? 'withdrawal' : 'expense',
-                currency: currency || intent.currency || 'USD',
+                currency: currency || intent.currency,
                 status: initialStatus,
                 status_history: [
                     { status: 'created' as TransactionStatus, timestamp },
@@ -280,8 +280,8 @@ export class BankingEngineService {
         let currentBalance = 0;
         let walletName = intent.metadata?.sub_wallet_type || 'Operating Wallet';
 
-        const sourceCurrency = intent.metadata?.source_currency || intent.currency || 'USD';
-        const targetCurrency = intent.metadata?.target_currency || intent.currency || 'USD';
+        const sourceCurrency = intent.metadata?.source_currency || intent.currency;
+        const targetCurrency = intent.metadata?.target_currency || intent.currency;
         const isCrossCurrency = intent.metadata?.cross_currency === true;
         const fxDetails = intent.metadata?.fx_details;
 
@@ -543,7 +543,7 @@ export class BankingEngineService {
             type: (intent.type.toLowerCase() === 'internal_transfer' || intent.type.toLowerCase() === 'peer_transfer') ? 'transfer' : 
                   (intent.type.toLowerCase() === 'deposit') ? 'deposit' : 
                   (intent.type.toLowerCase() === 'withdrawal') ? 'withdrawal' : 'expense',
-            currency: intent.currency || 'USD',
+            currency: intent.currency,
             status: status,
             walletId: intent.sourceWalletId,
             toWalletId: intent.targetWalletId,
@@ -589,7 +589,7 @@ export class BankingEngineService {
 
             const amount = Number(await DataVault.decrypt(tx.amount));
             const targetWalletId = tx.to_wallet_id;
-            const currency = tx.currency || 'USD';
+            const currency = tx.currency;
             const targetCurrency = tx.metadata?.target_currency || currency;
             const targetAmount = tx.metadata?.fx_details?.finalAmount || amount;
             
@@ -728,7 +728,7 @@ export class BankingEngineService {
             const recipientName = recipientProfile?.full_name || recipientAuth?.user?.user_metadata?.full_name || 'Customer';
             const recipientAccount = wallet?.account_number || recipientProfile?.customer_id || 'Orbi Account';
             
-            const currency = tx.currency || 'Tsh';
+            const currency = tx.currency;
             const targetCurrency = tx.metadata?.target_currency || currency;
             const timestamp = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true }).toLowerCase();
             const refId = tx.reference_id || tx.referenceId || txId;

@@ -175,7 +175,7 @@ export class GoalService {
         let goalName = 'Goal';
         let goalUserId = '';
         let currentAmount = 0;
-        let currency = 'USD';
+        let currency = 'TZS';
         
         if (sb) {
             const { data: goal, error } = await sb
@@ -284,7 +284,7 @@ export class GoalService {
         let currentAmount = 0;
         let goalName = 'Goal';
         let goalUserId = '';
-        let currency = 'USD';
+        let currency = 'TZS';
         if (sb) {
             const { data: goal, error } = await sb
                 .from('goals')

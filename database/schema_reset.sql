@@ -190,9 +190,10 @@ CREATE TABLE public.transactions (
     wallet_id UUID,
     to_wallet_id UUID,
     amount TEXT NOT NULL,
+    currency TEXT DEFAULT 'TZS',
     description TEXT NOT NULL,
     type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('created', 'pending', 'authorized', 'processing', 'completed', 'failed', 'cancelled', 'held_for_review', 'reversed', 'refunded')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('created', 'pending', 'authorized', 'processing', 'settled', 'completed', 'failed', 'cancelled', 'held_for_review', 'reversed', 'refunded')),
     status_notes TEXT,
     date DATE DEFAULT CURRENT_DATE,
     metadata JSONB DEFAULT '{}'::jsonb,
@@ -308,6 +309,8 @@ CREATE TABLE public.goals (
     icon TEXT, 
     funding_strategy TEXT DEFAULT 'manual', 
     auto_allocation_enabled BOOLEAN DEFAULT FALSE, 
+    linked_income_percentage NUMERIC,
+    monthly_target NUMERIC,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

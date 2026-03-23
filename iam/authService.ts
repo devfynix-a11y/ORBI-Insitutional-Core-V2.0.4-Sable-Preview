@@ -566,6 +566,13 @@ export class AuthService {
         const sb = getSupabase();
         if (sb) {
             try {
+                const normalizedCurrency = typeof m?.currency === 'string'
+                    ? m.currency.trim().toUpperCase()
+                    : '';
+                if (!normalizedCurrency) {
+                    return { data: null, error: { message: "CURRENCY_REQUIRED: Account currency is mandatory at signup." } };
+                }
+
                 // Generate customer_id if not provided
                 const customerId = m?.customer_id || IdentityGenerator.generateCustomerID();
                 
@@ -610,6 +617,7 @@ export class AuthService {
                     ...m, 
                     phone: formattedPhone, 
                     customer_id: customerId, 
+                    currency: normalizedCurrency,
                     language: language,
                     account_status: 'pending',
                     role,
@@ -657,7 +665,7 @@ export class AuthService {
                         customer_id: customerId,
                         phone: formattedPhone,
                         nationality: nationality,
-                        currency: m?.currency || 'TSH',
+                        currency: normalizedCurrency,
                         language: language,
                         account_status: 'active',
                         registry_type: registryType,
@@ -885,6 +893,15 @@ export class AuthService {
     }
 
     async completeProfile(phone: string, updates: any) { 
+        if (Object.prototype.hasOwnProperty.call(updates || {}, 'currency')) {
+            const normalizedCurrency = typeof updates?.currency === 'string'
+                ? updates.currency.trim().toUpperCase()
+                : '';
+            if (!normalizedCurrency) {
+                return { success: false, error: "CURRENCY_REQUIRED: Account currency cannot be empty." };
+            }
+            updates = { ...updates, currency: normalizedCurrency };
+        }
         let users = Storage.getFromDB<any>(STORAGE_KEYS.CUSTOM_USERS);
         const idx = users.findIndex(u => u.phone === phone);
         if (idx >= 0) {

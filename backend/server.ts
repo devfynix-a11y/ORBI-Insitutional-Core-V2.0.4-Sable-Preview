@@ -231,6 +231,12 @@ class OrbiServer {
     async getTransactionPreview(userId: string, payload: any) {
         const sb = getAdminSupabase();
         if (!sb) throw new Error("DB_OFFLINE");
+        const requestCurrency = typeof payload?.currency === 'string'
+            ? payload.currency.trim().toUpperCase()
+            : '';
+        if (!requestCurrency) {
+            throw new Error("CURRENCY_REQUIRED: Transaction preview requires an explicit currency.");
+        }
         
         // Fetch user to ensure they exist and get metadata
         const { data: authUser } = await sb.auth.admin.getUserById(userId);
@@ -254,7 +260,7 @@ class OrbiServer {
             recipientId: payload.recipientId,
             recipient_customer_id: payload.recipient_customer_id,
             amount: payload.amount,
-            currency: payload.currency || 'TZS',
+            currency: requestCurrency,
             description: payload.description || 'Preview',
             type: payload.type || 'INTERNAL_TRANSFER',
             metadata: payload.metadata,
@@ -268,6 +274,12 @@ class OrbiServer {
     async calculateSettlementBreakdown(payload: any) {
         const session = await this.auth.getSession();
         if (!session) throw new Error("IDENTITY_REQUIRED");
+        const requestCurrency = typeof payload?.currency === 'string'
+            ? payload.currency.trim().toUpperCase()
+            : '';
+        if (!requestCurrency) {
+            throw new Error("CURRENCY_REQUIRED: Settlement breakdown requires an explicit currency.");
+        }
         return EntProcessor.process(session.user as any, { 
             idempotencyKey: payload.idempotencyKey || `calc-${Date.now()}`,
             sourceWalletId: payload.sourceWalletId,
@@ -275,7 +287,7 @@ class OrbiServer {
             recipientId: payload.recipientId,
             recipient_customer_id: payload.recipient_customer_id,
             amount: payload.amount,
-            currency: payload.currency || 'TZS',
+            currency: requestCurrency,
             description: payload.description || 'Calculation',
             type: payload.type || 'INTERNAL_TRANSFER',
             walletType: payload.walletType,
@@ -288,6 +300,12 @@ class OrbiServer {
     async processSecurePayment(payload: any, user?: any) {
         const sessionUser = user || (await this.auth.getSession())?.user;
         if (!sessionUser) throw new Error("IDENTITY_REQUIRED");
+        const requestCurrency = typeof payload?.currency === 'string'
+            ? payload.currency.trim().toUpperCase()
+            : '';
+        if (!requestCurrency) {
+            throw new Error("CURRENCY_REQUIRED: Secure payment requires an explicit currency.");
+        }
         
         const result = await EntProcessor.process(sessionUser as any, {
             idempotencyKey: payload.idempotencyKey || `tx-${Date.now()}-${Math.random()}`,
@@ -297,7 +315,7 @@ class OrbiServer {
             recipientId: payload.recipientId,
             recipient_customer_id: payload.recipient_customer_id,
             amount: payload.amount,
-            currency: payload.currency || 'TZS',
+            currency: requestCurrency,
             description: payload.description || 'Secure Payment',
             type: payload.type || 'INTERNAL_TRANSFER',
             walletType: payload.walletType,
@@ -713,12 +731,19 @@ class OrbiServer {
         if (!sb) return { error: 'DB_OFFLINE' };
         
         // 1. Create the Organization
+        const baseCurrency = typeof payload?.base_currency === 'string'
+            ? payload.base_currency.trim().toUpperCase()
+            : '';
+        if (!baseCurrency) {
+            throw new Error("CURRENCY_REQUIRED: Organization base currency is required.");
+        }
+
         const { data, error } = await sb.from('organizations').insert({
             name: payload.name,
             registration_number: payload.registration_number,
             tax_id: payload.tax_id,
             country: payload.country,
-            base_currency: payload.base_currency || 'USD',
+            base_currency: baseCurrency,
             metadata: payload.metadata || {}
         }).select().single();
 

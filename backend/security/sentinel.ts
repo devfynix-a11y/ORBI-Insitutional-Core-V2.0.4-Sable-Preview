@@ -43,7 +43,7 @@ class SecuritySentinel {
             trustLevel,
             op: operation,
             ts: new Date().toISOString(),
-            riskContext: safePayload.amount ? `Volume: ${safePayload.amount} ${safePayload.currency || 'USD'}` : 'Non-financial Metadata Sync'
+            riskContext: safePayload.amount ? `Volume: ${safePayload.amount} ${safePayload.currency || ''}`.trim() : 'Non-financial Metadata Sync'
         };
 
         try {

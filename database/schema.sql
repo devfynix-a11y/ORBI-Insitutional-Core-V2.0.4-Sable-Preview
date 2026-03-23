@@ -118,9 +118,10 @@ CREATE TABLE IF NOT EXISTS public.transactions (
     wallet_id UUID,
     to_wallet_id UUID,
     amount TEXT NOT NULL,
+    currency TEXT DEFAULT 'TZS',
     description TEXT NOT NULL,
     type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('created', 'pending', 'authorized', 'processing', 'completed', 'failed', 'cancelled', 'held_for_review', 'reversed', 'refunded')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('created', 'pending', 'authorized', 'processing', 'settled', 'completed', 'failed', 'cancelled', 'held_for_review', 'reversed', 'refunded')),
     status_notes TEXT,
     date DATE DEFAULT CURRENT_DATE,
     metadata JSONB DEFAULT '{}'::jsonb,
@@ -147,6 +148,10 @@ BEGIN
     
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='reference_id') THEN
         ALTER TABLE public.transactions ADD COLUMN reference_id TEXT UNIQUE;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='currency') THEN
+        ALTER TABLE public.transactions ADD COLUMN currency TEXT DEFAULT 'TZS';
     END IF;
 
     -- Add User Setting Columns
@@ -181,6 +186,56 @@ BEGIN
     END IF;
 END $$;
 
+DO $$
+DECLARE
+    tx_constraint RECORD;
+BEGIN
+    FOR tx_constraint IN
+        SELECT c.conname
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'transactions'
+          AND c.contype = 'c'
+          AND pg_get_constraintdef(c.oid) LIKE '%status%'
+          AND pg_get_constraintdef(c.oid) NOT LIKE '%settled%'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE public.transactions DROP CONSTRAINT %I',
+            tx_constraint.conname
+        );
+    END LOOP;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE n.nspname = 'public'
+          AND t.relname = 'transactions'
+          AND c.conname = 'transactions_status_check_v2'
+    ) THEN
+        ALTER TABLE public.transactions
+            ADD CONSTRAINT transactions_status_check_v2
+            CHECK (
+                status IN (
+                    'created',
+                    'pending',
+                    'authorized',
+                    'processing',
+                    'settled',
+                    'completed',
+                    'failed',
+                    'cancelled',
+                    'held_for_review',
+                    'reversed',
+                    'refunded'
+                )
+            );
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS public.financial_ledger (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
@@ -212,6 +267,8 @@ CREATE TABLE IF NOT EXISTS public.goals (
     icon TEXT, 
     funding_strategy TEXT DEFAULT 'manual', 
     auto_allocation_enabled BOOLEAN DEFAULT FALSE, 
+    linked_income_percentage NUMERIC,
+    monthly_target NUMERIC,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -295,6 +352,12 @@ BEGIN
         ALTER TABLE public.goals ADD COLUMN currency TEXT DEFAULT 'TZS';
         ALTER TABLE public.goals ADD COLUMN status TEXT DEFAULT 'ACTIVE';
         ALTER TABLE public.goals ADD COLUMN is_corporate BOOLEAN DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='goals' AND column_name='linked_income_percentage') THEN
+        ALTER TABLE public.goals ADD COLUMN linked_income_percentage NUMERIC;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='goals' AND column_name='monthly_target') THEN
+        ALTER TABLE public.goals ADD COLUMN monthly_target NUMERIC;
     END IF;
 END $$;
 
