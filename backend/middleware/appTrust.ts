@@ -11,10 +11,37 @@ export const ALLOWED_DOMAINS = [
     '127.0.0.1'
 ];
 
-const TRUSTED_MOBILE_APP_ORIGINS = [
+const TRUSTED_APP_ORIGINS = [
     process.env.ORBI_MOBILE_ORIGIN,
+    process.env.ORBI_CORE_APP_ORIGIN,
     'ORBI_MOBILE_V2026',
+    'OBI_INSTITUTIONAL_CORE_V25',
+    'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
+
+const TRUSTED_APP_IDS = [
+    process.env.ORBI_MOBILE_APP_ID,
+    process.env.ORBI_CORE_APP_ID,
+    'mobile-android',
+    'OBI_INSTITUTIONAL_CORE_V25',
+    'DPS_INSTITUTIONAL_CORE_V25',
+].filter((value): value is string => Boolean(value && value.trim()));
+
+const resolveTrustedAppRequest = (
+    appIdHeader: string,
+    appOriginHeader: string,
+    origin: string,
+) => {
+    const isTrustedOrigin =
+        TRUSTED_APP_ORIGINS.includes(origin) ||
+        TRUSTED_APP_ORIGINS.includes(appOriginHeader);
+    const isTrustedId = TRUSTED_APP_IDS.includes(appIdHeader);
+    return {
+        isTrustedOrigin,
+        isTrustedId,
+        isTrustedApp: isTrustedOrigin && isTrustedId,
+    };
+};
 
 /**
  * APP TRUST MIDDLEWARE
@@ -34,7 +61,7 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     const rpID = req.hostname;
     const origin = req.get('origin') || req.get('referer') || '';
     const apkHashHeader = req.get('x-orbi-apk-hash'); // Custom header for native app identification
-    const appIdHeader = req.get('x-orbi-app-id'); // App ID identification
+    const appIdHeader = req.get('x-orbi-app-id') || ''; // App ID identification
     const appOriginHeader = req.get('x-orbi-app-origin') || '';
 
     const isLocal = rpID === 'localhost' || rpID === '127.0.0.1';
@@ -52,12 +79,13 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     // 3b. Web Browser & Mobile App Requests: Require exact allowed Origin/Referer host
     // In production, we don't trust all *.run.app hosts.
     const isWebOrigin = ALLOWED_DOMAINS.some(domain => origin.includes(domain));
-    const isMobileApp =
-        TRUSTED_MOBILE_APP_ORIGINS.includes(origin) ||
-        TRUSTED_MOBILE_APP_ORIGINS.includes(appOriginHeader);
-    const isTrustedMobileId = appIdHeader === 'mobile-android' && isMobileApp;
+    const { isTrustedOrigin, isTrustedId, isTrustedApp } = resolveTrustedAppRequest(
+        appIdHeader,
+        appOriginHeader,
+        origin,
+    );
     
-    if (isWebOrigin || isLocal || isMobileApp || isTrustedMobileId) {
+    if (isWebOrigin || isLocal || isTrustedApp) {
         return next();
     }
 
@@ -85,6 +113,8 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
     // 7. Security Rejection
     const rejectionReason = !isWebOrigin && !isLocal && !apkHashHeader ? 'Missing Origin/Hash' : 
                            apkHashHeader && apkHashHeader !== expectedHash ? 'Invalid APK Hash' :
+                           !isTrustedOrigin ? 'Untrusted App Origin' :
+                           !isTrustedId ? 'Untrusted App ID' :
                            'Untrusted Origin';
 
     console.warn(`[Security] Untrusted request blocked: 

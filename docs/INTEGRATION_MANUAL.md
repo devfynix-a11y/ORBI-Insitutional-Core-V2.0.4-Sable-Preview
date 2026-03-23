@@ -37,8 +37,8 @@ The **Cyber Sentinel WAF** will summarily reject any request missing these heade
 | Header | Required? | Format | Description |
 | :--- | :--- | :--- | :--- |
 | `Authorization` | YES | `Bearer <JWT>` | The session token acquired via Login. |
-| `x-orbi-app-id` | YES | `mobile-ios` \| `mobile-android` | Identifies the client cluster. |
-| `x-orbi-app-origin` | YES | `ORBI_MOBILE_V2026` | Identifies the application origin. |
+| `x-orbi-app-id` | YES | `mobile-ios` \| `mobile-android` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the client cluster. |
+| `x-orbi-app-origin` | YES | `ORBI_MOBILE_V2026` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the application origin. |
 | `x-orbi-apk-hash` | CONDITIONAL | `SHA-256 Hash` | **REQUIRED** for Android native apps. |
 | `x-orbi-trace` | YES | `UUID-v4` | Unique request ID for distributed tracing. |
 | `x-idempotency-key` | CONDITIONAL | `UUID-v4` | **REQUIRED** for all `POST /transactions` operations. |
@@ -955,3 +955,4 @@ For deep technical details on treasury management, external linked wallets, and 
 
 **ORBI Financial Technologies Ltd.**  
 *Engineering Division - Sovereign Core Team*
+

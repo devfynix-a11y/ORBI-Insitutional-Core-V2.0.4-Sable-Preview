@@ -41,7 +41,12 @@ export class TaskService {
         }
 
         let items = Storage.getFromDB<Task>(STORAGE_KEYS.TASKS); 
-        items.push(t);
+        const index = items.findIndex(item => String(item.id) === String(t.id));
+        if (index === -1) {
+            items.push(t);
+        } else {
+            items[index] = { ...items[index], ...t };
+        }
         Storage.saveToDB(STORAGE_KEYS.TASKS, items); 
         return { data: t, error: null }; 
     }
@@ -58,12 +63,21 @@ export class TaskService {
                 bounty: t.bounty
             }).eq('id', t.id);
         }
+        let items = Storage.getFromDB<Task>(STORAGE_KEYS.TASKS);
+        const index = items.findIndex(item => String(item.id) === String(t.id));
+        if (index !== -1) {
+            items[index] = { ...items[index], ...t };
+            Storage.saveToDB(STORAGE_KEYS.TASKS, items);
+        }
         return { error: null }; 
     }
 
     async deleteTask(id: string) { 
         const sb = getSupabase();
         if (sb) await sb.from('tasks').delete().eq('id', id);
+        let items = Storage.getFromDB<Task>(STORAGE_KEYS.TASKS);
+        items = items.filter(item => String(item.id) !== String(id));
+        Storage.saveToDB(STORAGE_KEYS.TASKS, items);
         return { error: null }; 
     }
 }

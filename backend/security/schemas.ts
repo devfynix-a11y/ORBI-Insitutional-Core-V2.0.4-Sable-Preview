@@ -24,6 +24,7 @@ export const SignUpSchema = z.object({
     phone: z.string().min(1).optional(),
     nationality: z.string().optional(),
     address: z.string().optional(),
+    language: z.enum(['en', 'sw']).optional(),
     currency: z.string().length(3).default('USD'),
     registry_type: z.string().default('CONSUMER'),
     metadata: z.record(z.string(), z.any()).optional()
@@ -65,6 +66,20 @@ export const GoalCreateSchema = z.object({
     autoAllocationEnabled: z.boolean().optional(),
     linkedIncomePercentage: z.number().optional(),
     monthlyTarget: z.number().optional()
+});
+
+export const GoalUpdateSchema = z.object({
+    name: z.string().min(1).optional(),
+    target: z.number().positive().optional(),
+    deadline: z.string().datetime().nullable().optional(),
+    color: z.string().optional(),
+    icon: z.string().optional(),
+    fundingStrategy: z.enum(['manual', 'percentage', 'fixed']).optional(),
+    autoAllocationEnabled: z.boolean().optional(),
+    linkedIncomePercentage: z.number().optional(),
+    monthlyTarget: z.number().optional()
+}).refine(data => Object.keys(data).length > 0, {
+    message: 'At least one goal field is required'
 });
 
 export const KYCSubmitSchema = z.object({

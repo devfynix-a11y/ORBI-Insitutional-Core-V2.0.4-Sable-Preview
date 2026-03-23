@@ -27,7 +27,7 @@ The Core App must include the following headers in **every** request to pass the
 | Header | Value | Description |
 | :--- | :--- | :--- |
 | `x-orbi-app-id` | `OBI_INSTITUTIONAL_CORE_V25` | **CRITICAL**: Identifies the client as the Core App. |
-| `x-orbi-app-origin` | `ORBI_MOBILE_V2026` | **CRITICAL**: Identifies the application origin. |
+| `x-orbi-app-origin` | `OBI_INSTITUTIONAL_CORE_V25` | **CRITICAL**: Identifies the institutional application origin. |
 | `x-orbi-trace` | `{UUID}` | Unique request ID for tracing. |
 | `Content-Type` | `application/json` | Standard payload format. |
 | `Authorization` | `Bearer {JWT}` | Admin/Staff session token. |
@@ -56,4 +56,5 @@ Enable the following flags in the Core App configuration to support the new Stag
 *   **System Health**: `GET /v1/sys/metrics`
 
 ---
-**Note**: The `x-orbi-app-id` header is strictly enforced. Using `mobile-ios` or other IDs will restrict access to Consumer-only endpoints and hide Administrative functions.
+**Note**: The backend trust layer now accepts both consumer-mobile and institutional/core app identities. Core/admin surfaces should use `OBI_INSTITUTIONAL_CORE_V25` (or `DPS_INSTITUTIONAL_CORE_V25`) consistently with the matching `x-orbi-app-origin`.
+

@@ -19,7 +19,7 @@ import { PolicyEngine } from './backend/ledger/PolicyEngine.js';
 import { ConfigClient } from './backend/infrastructure/RulesConfigClient.js';
 import { 
     LoginSchema, SignUpSchema, PaymentIntentSchema, 
-    WalletCreateSchema, GoalCreateSchema, KYCSubmitSchema, KYCReviewSchema,
+    WalletCreateSchema, GoalCreateSchema, GoalUpdateSchema, KYCSubmitSchema, KYCReviewSchema,
     AccountStatusUpdateSchema, UserProfileUpdateSchema, StaffCreateSchema,
     DeviceRegisterSchema, DeviceTrustSchema, DocumentUploadSchema, DocumentVerifySchema
 } from './backend/security/schemas.js';
@@ -44,6 +44,8 @@ import { TransactionSigning } from './backend/src/modules/transaction/signing.se
 import { GoogleGenAI, Type } from "@google/genai";
 import { appTrustMiddleware } from './backend/middleware/appTrust.js';
 import { RecoveryService } from './services/security/recoveryService.js';
+import { OTPService } from './backend/security/otpService.js';
+import { Sessions } from './backend/src/modules/session/session.service.js';
 
 // Helper for Gemini calls with retry logic
 async function callGeminiWithRetry(ai: GoogleGenAI, params: any, retries = 3, delay = 1000): Promise<any> {
@@ -876,7 +878,37 @@ v1.post('/auth/verify', authenticate as any, async (req, res) => {
     const { requestId, code } = req.body;
     try {
         const result = await LogicCore.verifySensitiveAction(requestId, code, session.sub);
-        res.json(result);
+        if (result?.success === true) {
+            const accessToken = req.headers.authorization?.startsWith('Bearer ')
+                ? req.headers.authorization.substring(7)
+                : null;
+            const deviceId =
+                session?.deviceId ||
+                session?.user?.user_metadata?.fingerprint ||
+                session?.user?.user_metadata?.device_id;
+            const refreshToken = Sessions.createRefreshToken(session.sub, deviceId);
+            const user = {
+                id: session.sub,
+                email: session.user?.email,
+                phone: session.user?.phone,
+                ...session.user?.user_metadata
+            };
+
+            return res.json({
+                success: true,
+                data: {
+                    success: true,
+                    verified: true,
+                    access_token: accessToken,
+                    refresh_token: refreshToken,
+                    user
+                }
+            });
+        }
+        return res.status(403).json({
+            success: false,
+            error: result?.error || 'INVALID_OTP'
+        });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });
     }
@@ -1957,15 +1989,33 @@ v1.get('/insights', authenticate as any, async (req, res) => {
             .limit(20);
         
         const { data: goals } = await sb!.from('goals')
-            .select('name, target_amount, current_amount')
+            .select('name, target_amount, current_amount, funding_strategy, auto_allocation_enabled, linked_income_percentage, monthly_target')
+            .eq('user_id', userId);
+        
+        const { data: categories } = await sb!.from('categories')
+            .select('name, budget, spent_amount, hard_limit, period')
             .eq('user_id', userId);
 
-        const context = { transactions, goals };
+        const allocatedToGoals = (goals || []).reduce((sum: number, g: any) => sum + Number(g.current_amount || 0), 0);
+        const allocatedToBudgets = (categories || []).reduce((sum: number, c: any) => sum + Number(c.budget || 0), 0);
+        const recentSpend = (transactions || []).reduce((sum: number, t: any) => sum + Number(t.amount || 0), 0);
+
+        const context = {
+            transactions,
+            goals,
+            categories,
+            moneyState: {
+                allocatedToGoals,
+                allocatedToBudgets,
+                totalAllocated: allocatedToGoals + allocatedToBudgets,
+                recentObservedSpend: recentSpend
+            }
+        };
 
         // 2. Generate insights using Gemini
         const systemInstruction = `
             You are the Orbi Financial Advisor. 
-            Analyze the provided transaction history and savings goals to provide personalized financial advice.
+            Analyze the provided transaction history, savings goals, budget allocations, and money-state summary to provide personalized financial advice.
             
             Return the response in the following JSON format:
             {
@@ -1975,8 +2025,11 @@ v1.get('/insights', authenticate as any, async (req, res) => {
             }
             
             GUIDELINES:
-            - Base all advice ONLY on the provided user activity (transactions and goals).
-            - Focus on spending habits, savings progress, and helpful tips.
+            - Base all advice ONLY on the provided user activity (transactions, goals, categories, and moneyState).
+            - Focus on spending habits, savings progress, budget pressure, allocation discipline, and helpful next steps.
+            - Explicitly reason about where money currently sits: available, budgeted, saved, locked, or spent.
+            - Prefer concrete behavioral observations over generic advice.
+            - Mention weak liquidity, overspending pressure, or over-concentration in allocations when the data supports it.
             - Use a professional, helpful, and secure tone.
             - Avoid technical jargon; use user-friendly terms.
             - CRITICAL: Do NOT use the word 'Fynix' or 'fynix'. Always use 'Orbi'.
@@ -2112,6 +2165,15 @@ v1.get('/goals', authenticate as any, async (req, res) => {
     }
 });
 
+v1.patch('/goals/:id', authenticate as any, validate(GoalUpdateSchema), async (req, res) => {
+    try {
+        const result = await LogicCore.updateGoal({ ...req.body, id: req.params.id });
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 v1.delete('/goals/:id', authenticate as any, async (req, res) => {
     try {
         const result = await LogicCore.deleteGoal(req.params.id);
@@ -2204,6 +2266,39 @@ v1.post('/goals/:id/allocate', authenticate as any, async (req, res) => {
 
     try {
         const result = await LogicCore.allocateToGoal(req.params.id, amount, sourceWalletId);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/goals/:id/withdraw', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    const { amount, destinationWalletId, verification } = req.body;
+    if (!amount || !destinationWalletId) {
+        return res.status(400).json({ success: false, error: 'MISSING_PARAMS' });
+    }
+
+    const otpRequestId = verification?.otpRequestId || verification?.requestId || req.body.otpRequestId;
+    const otpCode = verification?.otpCode || req.body.otpCode;
+    if (!otpRequestId || !otpCode) {
+        return res.status(403).json({ success: false, error: 'SECURITY_VERIFICATION_REQUIRED' });
+    }
+
+    try {
+        const verified = await OTPService.verify(String(otpRequestId), String(otpCode), session.sub);
+        if (!verified) {
+            return res.status(403).json({ success: false, error: 'SECURITY_VERIFICATION_FAILED' });
+        }
+
+        const result = await LogicCore.withdrawFromGoal(req.params.id, amount, destinationWalletId, {
+            verifiedVia: verification?.verifiedVia || 'otp',
+            pinVerified: verification?.pinVerified === true,
+            deliveryType: verification?.deliveryType || null,
+            otpRequestId: String(otpRequestId),
+            otpVerifiedAt: new Date().toISOString(),
+            verifiedByUserId: session.sub
+        });
         res.json({ success: true, data: result });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });

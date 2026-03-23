@@ -18,13 +18,34 @@ import { ALLOWED_DOMAINS } from "../../../middleware/appTrust.js";
 const cleanAndroidHash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
 const EXPECTED_ANDROID_ORIGIN = cleanAndroidHash ? `android:apk-key-hash:${cleanAndroidHash}` : '';
 const ALLOWED_APK_HASHES = EXPECTED_ANDROID_ORIGIN ? [normalizeAndroidOrigin(EXPECTED_ANDROID_ORIGIN)] : [];
-const TRUSTED_MOBILE_APP_ORIGINS = [
+const TRUSTED_APP_ORIGINS = [
     process.env.ORBI_MOBILE_ORIGIN,
+    process.env.ORBI_CORE_APP_ORIGIN,
     'ORBI_MOBILE_V2026',
+    'OBI_INSTITUTIONAL_CORE_V25',
+    'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
 
-const isTrustedMobileAppIdentity = (appIdentity: string) =>
-    TRUSTED_MOBILE_APP_ORIGINS.includes(appIdentity);
+const TRUSTED_APP_IDS = [
+    process.env.ORBI_MOBILE_APP_ID,
+    process.env.ORBI_CORE_APP_ID,
+    'mobile-android',
+    'OBI_INSTITUTIONAL_CORE_V25',
+    'DPS_INSTITUTIONAL_CORE_V25',
+].filter((value): value is string => Boolean(value && value.trim()));
+
+const resolveTrustedAppIdentity = (req: Request) => {
+    const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin || '';
+    const appIdHeader = req.get('x-orbi-app-id') || '';
+    const isTrustedOrigin = TRUSTED_APP_ORIGINS.includes(appIdentity);
+    const isTrustedId = TRUSTED_APP_IDS.includes(appIdHeader);
+    return {
+        appIdentity,
+        appIdHeader,
+        isTrustedOrigin,
+        isTrustedApp: isTrustedOrigin && isTrustedId,
+    };
+};
 
 const validateBiometricContext = (req: any) => {
     // Strictly use the specified domain for both prod and dev
@@ -60,14 +81,11 @@ const validateBiometricContext = (req: any) => {
     }
 
     // App Identity Metadata (Separate from WebAuthn Origin)
-    const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-    const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
-    const appIdHeader = req.get('x-orbi-app-id');
-    const isTrustedMobileId = appIdHeader === 'mobile-android' && isMobileApp;
+    const { appIdentity, appIdHeader, isTrustedApp } = resolveTrustedAppIdentity(req);
 
     // 4. Final fallback
     if (!origin) {
-        if (isTrustedMobileId && cleanAndroidHash) {
+        if (isTrustedApp && cleanAndroidHash) {
             origin = `android:apk-key-hash:${cleanAndroidHash}`;
         } else {
             origin = process.env.ORBI_WEB_ORIGIN || `https://${req.get('host')}`;
@@ -106,7 +124,7 @@ const validateBiometricContext = (req: any) => {
             err.status = 403;
             throw err;
         }
-    } else if (!isWebOrigin && !isIosBundle && !isTrustedMobileId) {
+    } else if (!isWebOrigin && !isIosBundle && !isTrustedApp) {
          console.error(`[Security] Untrusted Origin Rejection:
             Origin=${origin}
             RP_ID=${finalRpId}
@@ -126,17 +144,43 @@ const validateBiometricContext = (req: any) => {
 export class AuthController {
     async startPasskeyLogin(req: Request, res: Response) {
         try {
-            const { userId } = req.body;
-            if (!userId) return res.status(400).json({ error: "User ID required" });
+            const rawUserId = typeof req.body.userId === 'string' ? req.body.userId.trim() : '';
+            const identifier = typeof req.body.identifier === 'string'
+                ? req.body.identifier.trim()
+                : typeof req.body.email === 'string'
+                    ? req.body.email.trim()
+                    : '';
+
+            let resolvedUserId = rawUserId;
+            if (!resolvedUserId && identifier) {
+                const sb = getAdminSupabase();
+                if (!sb) {
+                    throw new Error('Database offline');
+                }
+
+                const { data: user, error } = await sb
+                    .from('users')
+                    .select('id')
+                    .or(`email.eq.${identifier},phone.eq.${identifier}`)
+                    .maybeSingle();
+
+                if (error) throw error;
+                resolvedUserId = user?.id?.toString() || '';
+            }
+
+            if (!resolvedUserId) {
+                return res.status(400).json({ error: 'User ID or identifier required' });
+            }
 
             const { rpID } = validateBiometricContext(req);
-            const options = await Passkeys.generateLoginOptions(userId, rpID);
+            const options = await Passkeys.generateLoginOptions(resolvedUserId, rpID);
             res.json({ success: true, data: options });
         } catch (e: any) {
             console.error(`[Auth] Error in startPasskeyLogin:
                 Error=${e.message}
                 Stack=${e.stack}
                 User_ID=${req.body.userId}
+                Identifier=${req.body.identifier || req.body.email}
                 IP=${req.ip}
             `);
             res.status(e.status || 500).json({ error: e.message });
@@ -162,13 +206,10 @@ export class AuthController {
 
             // 2. Verify Passkey
             const { rpID, origin } = validateBiometricContext(req);
-            const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-            const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
-            const appIdHeader = req.get('x-orbi-app-id');
-            const isTrustedMobile = isMobileApp && appIdHeader === 'mobile-android';
+            const { appIdentity, appIdHeader, isTrustedApp } = resolveTrustedAppIdentity(req);
             
             // Fail closed if Android origin is missing on Android biometric completion
-            if (platform === 'android' && !origin.startsWith('android:apk-key-hash:') && !isTrustedMobile) {
+            if (platform === 'android' && !origin.startsWith('android:apk-key-hash:') && !isTrustedApp) {
                 console.error(`[Security] Missing Android Origin on Android platform:
                     User_ID=${userId}
                     Origin=${origin}
@@ -331,13 +372,10 @@ export class AuthController {
         try {
             const { userId, response, challenge, platform } = req.body;
             const { rpID, origin } = validateBiometricContext(req);
-            const appIdentity = req.get('x-orbi-app-origin') || req.get('origin') || req.body.origin;
-            const isMobileApp = isTrustedMobileAppIdentity(appIdentity);
-            const appIdHeader = req.get('x-orbi-app-id');
-            const isTrustedMobile = isMobileApp && appIdHeader === 'mobile-android';
+            const { appIdentity, appIdHeader, isTrustedApp } = resolveTrustedAppIdentity(req);
 
             // Fail closed if Android origin is missing on Android biometric registration
-            if (platform === 'android' && !origin.startsWith('android:apk-key-hash:') && !isTrustedMobile) {
+            if (platform === 'android' && !origin.startsWith('android:apk-key-hash:') && !isTrustedApp) {
                 console.error(`[Security] Missing Android Origin on Android registration:
                     User_ID=${userId}
                     Origin=${origin}
@@ -392,3 +430,7 @@ export class AuthController {
 }
 
 export const Auth = new AuthController();
+
+
+
+

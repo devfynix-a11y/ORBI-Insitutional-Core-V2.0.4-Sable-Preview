@@ -346,7 +346,11 @@ class OrbiServer {
 
     // --- STRATEGY & PLANNING ---
     async postGoal(p: any) { return this.goal.postGoal(p); }
+    async updateGoal(p: any) { return this.goal.updateGoal(p); }
     async allocateToGoal(goalId: string, amount: number, walletId: string) { return this.goal.allocateFunds(goalId, amount, walletId); }
+    async withdrawFromGoal(goalId: string, amount: number, walletId: string, verification?: any) {
+        return this.goal.withdrawFunds(goalId, amount, walletId, verification);
+    }
     async deleteGoal(id: string) { return this.goal.deleteGoal(id); }
     async getGoals(userId: string) { return this.goal.fetchForUser(userId); }
     async postCategory(p: any) { return this.category.postCategory(p); }

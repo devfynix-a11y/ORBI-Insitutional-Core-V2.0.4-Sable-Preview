@@ -72,6 +72,15 @@ export class TransactionService {
                 console.log(`[Ledger] Found balance ${vault.balance} in platform_vaults for ${walletId}`);
                 return Number(vault.balance) || 0;
             }
+
+            // Goal-backed balances are stored on the goals table.
+            const { data: goal } = await sb.from('goals').select('current').eq('id', walletId).maybeSingle();
+            if (goal) {
+                const decrypted = await DataVault.decrypt(goal.current);
+                const resolved = Number(decrypted) || 0;
+                console.log(`[Ledger] Found balance ${resolved} in goals for ${walletId}`);
+                return resolved;
+            }
             
             console.log(`[Ledger] Balance not found in wallets or platform_vaults for ${walletId}, falling back to ledger`);
         } catch (e) {
@@ -98,29 +107,18 @@ export class TransactionService {
         if (!sb || !categoryId) return;
 
         try {
-            // 1. Fetch category details
             const { data: category } = await sb.from('categories')
                 .select('*')
                 .eq('id', categoryId)
                 .single();
 
-            if (!category || !category.is_corporate || !category.target_amount) return;
+            if (!category) return;
 
-            // 2. Determine period start date
-            const now = new Date();
-            let startDate = new Date();
-            if (category.period === 'MONTHLY') {
-                startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-            } else if (category.period === 'QUARTERLY') {
-                const quarter = Math.floor(now.getMonth() / 3);
-                startDate = new Date(now.getFullYear(), quarter * 3, 1);
-            } else if (category.period === 'ANNUAL') {
-                startDate = new Date(now.getFullYear(), 0, 1);
-            } else {
-                startDate = new Date(now.getFullYear(), now.getMonth(), 1); // default monthly
-            }
+            const target = await this.resolveBudgetTarget(category);
+            if (target <= 0) return;
 
-            // 3. Calculate total spent in this category for the period
+            const startDate = this.resolveBudgetPeriodStart(category.period);
+
             const { data: txs } = await sb.from('transactions')
                 .select('amount')
                 .eq('category_id', categoryId)
@@ -136,58 +134,57 @@ export class TransactionService {
             }
 
             const newTotal = totalSpent + amount;
-            const target = Number(category.target_amount);
+            const isCorporate = category.is_corporate === true;
+            const isHardLimit = isCorporate && category.hard_limit === true;
+            const budgetCurrency = category.currency || 'TZS';
 
-            // 4. Check limits and trigger alerts
             if (newTotal > target) {
-                if (category.hard_limit) {
-                    // Log alert
+                if (isHardLimit) {
                     await sb.from('budget_alerts').insert({
                         category_id: categoryId,
                         user_id: userId,
                         organization_id: category.organization_id,
                         transaction_id: txId,
                         amount: amount,
-                        alert_type: 'EXCEEDED_BLOCKED',
-                        metadata: { reference_id: referenceId }
+                        alert_type: 'EXCEEDED_BLOCKED'
                     });
                     
-                    this.notifyAdmins(category.organization_id, 'Budget Exceeded (Blocked)', `A transaction of ${amount} ${category.currency || 'TZS'} for ${category.name} was blocked because it exceeded the hard limit.`);
+                    this.notifyAdmins(category.organization_id, 'Budget Exceeded (Blocked)', `A transaction of ${amount} ${budgetCurrency} for ${category.name} was blocked because it exceeded the hard limit.`);
                     
-                    throw new Error(`BUDGET_EXCEEDED: Transaction blocked. Enterprise hard limit of ${target} ${category.currency || 'TZS'} for ${category.name} exceeded.`);
+                    throw new Error(`BUDGET_EXCEEDED: Transaction blocked. Enterprise hard limit of ${target} ${budgetCurrency} for ${category.name} exceeded.`);
                 } else {
-                    // Log warning alert
                     await sb.from('budget_alerts').insert({
                         category_id: categoryId,
                         user_id: userId,
-                        organization_id: category.organization_id,
+                        organization_id: category.organization_id || null,
                         transaction_id: txId,
                         amount: amount,
-                        alert_type: 'EXCEEDED_WARNING',
-                        metadata: { reference_id: referenceId }
+                        alert_type: isCorporate ? 'EXCEEDED_WARNING' : 'PERSONAL_BUDGET_EXCEEDED'
                     });
-                    
-                    this.notifyAdmins(category.organization_id, 'Budget Exceeded (Warning)', `A transaction of ${amount} ${category.currency || 'TZS'} for ${category.name} exceeded the budget target.`);
+
+                    if (isCorporate && category.organization_id) {
+                        this.notifyAdmins(category.organization_id, 'Budget Exceeded (Warning)', `A transaction of ${amount} ${budgetCurrency} for ${category.name} exceeded the budget target.`);
+                    }
                 }
             } else if (newTotal >= target * 0.8 && totalSpent < target * 0.8) {
-                // Crossed 80% threshold
                 await sb.from('budget_alerts').insert({
                     category_id: categoryId,
                     user_id: userId,
-                    organization_id: category.organization_id,
+                    organization_id: category.organization_id || null,
                     transaction_id: txId,
                     amount: amount,
-                    alert_type: 'WARNING_80_PERCENT',
-                    metadata: { reference_id: referenceId }
+                    alert_type: isCorporate ? 'WARNING_80_PERCENT' : 'PERSONAL_WARNING_80_PERCENT'
                 });
                 
-                this.notifyAdmins(
-                    category.organization_id, 
-                    'Budget Warning (80%)', 
-                    `Spending for ${category.name} has reached 80% of the budget target.`,
-                    'Onyo la Bajeti (80%)',
-                    `Matumizi ya ${category.name} yamefikia 80% ya lengo la bajeti.`
-                );
+                if (isCorporate && category.organization_id) {
+                    this.notifyAdmins(
+                        category.organization_id, 
+                        'Budget Warning (80%)', 
+                        `Spending for ${category.name} has reached 80% of the budget target.`,
+                        'Onyo la Bajeti (80%)',
+                        `Matumizi ya ${category.name} yamefikia 80% ya lengo la bajeti.`
+                    );
+                }
             }
         } catch (e: any) {
             if (e.message.includes('BUDGET_EXCEEDED')) throw e;
@@ -210,6 +207,136 @@ export class TransactionService {
                 const body = language === 'sw' && bodySw ? bodySw : bodyEn;
                 await Messaging.dispatch(admin.id, 'info', subject, body, { sms: true });
             }
+        }
+    }
+
+    private resolveBudgetPeriodStart(period?: string): Date {
+        const now = new Date();
+        if (period === 'QUARTERLY') {
+            const quarter = Math.floor(now.getMonth() / 3);
+            return new Date(now.getFullYear(), quarter * 3, 1);
+        }
+        if (period === 'ANNUAL') {
+            return new Date(now.getFullYear(), 0, 1);
+        }
+        return new Date(now.getFullYear(), now.getMonth(), 1);
+    }
+
+    private async resolveBudgetTarget(category: any): Promise<number> {
+        if (category?.target_amount !== undefined && category?.target_amount !== null) {
+            const value = typeof category.target_amount === 'string'
+                ? Number(await DataVault.decrypt(category.target_amount))
+                : Number(category.target_amount);
+            if (!isNaN(value) && value > 0) return value;
+        }
+        if (category?.budget !== undefined && category?.budget !== null) {
+            const value = typeof category.budget === 'string'
+                ? Number(await DataVault.decrypt(category.budget))
+                : Number(category.budget);
+            if (!isNaN(value) && value > 0) return value;
+        }
+        return 0;
+    }
+
+    private async emitFinancialEvent(eventType: string, aggregateId: string, payload: any, actor: string = 'system') {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return;
+
+        try {
+            await sb.from('financial_events').insert({
+                event_type: eventType,
+                aggregate_id: aggregateId,
+                payload,
+                actor
+            });
+        } catch (e: any) {
+            console.error(`[Ledger] Financial event emit failed for ${eventType}/${aggregateId}: ${e.message}`);
+        }
+    }
+
+    private async buildBudgetSnapshot(categoryId: string): Promise<any | null> {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return null;
+
+        const { data: category } = await sb.from('categories')
+            .select('*')
+            .eq('id', categoryId)
+            .maybeSingle();
+        if (!category) return null;
+
+        const target = await this.resolveBudgetTarget(category);
+        if (target <= 0) return null;
+
+        const startDate = this.resolveBudgetPeriodStart(category.period);
+        const { data: txs } = await sb.from('transactions')
+            .select('amount')
+            .eq('category_id', categoryId)
+            .gte('created_at', startDate.toISOString())
+            .neq('status', 'failed')
+            .neq('status', 'reversed');
+
+        let spent = 0;
+        if (txs) {
+            for (const tx of txs) {
+                spent += Number(await DataVault.decrypt(tx.amount));
+            }
+        }
+
+        const remaining = Math.max(target - spent, 0);
+        return {
+            category_id: categoryId,
+            category_name: category.name,
+            is_corporate: category.is_corporate === true,
+            target_amount: target,
+            spent_amount: Math.round(spent * 10000) / 10000,
+            remaining_amount: Math.round(remaining * 10000) / 10000,
+            utilization_ratio: target > 0 ? Math.round((spent / target) * 10000) / 10000 : 0,
+            period_start: startDate.toISOString(),
+            period_type: category.period || 'MONTHLY'
+        };
+    }
+
+    private async emitPurposeLifecycleEvents(txId: string, t: Partial<Transaction>, referenceId: string) {
+        const amount = Number(t.amount || 0);
+        const metadata = t.metadata || {};
+        const categoryId = t.categoryId ? String(t.categoryId) : '';
+        const goalId = metadata?.goal_id ? String(metadata.goal_id) : '';
+        const movement = metadata?.movement ? String(metadata.movement).toLowerCase() : '';
+
+        if (categoryId) {
+            const snapshot = await this.buildBudgetSnapshot(categoryId);
+            if (snapshot) {
+                await this.emitFinancialEvent('BUDGET_BUCKET_UPDATED', categoryId, {
+                    ...snapshot,
+                    transaction_id: txId,
+                    transaction_type: t.type || 'expense',
+                    amount,
+                    reference_id: referenceId
+                });
+            }
+        }
+
+        if (goalId && movement === 'allocate_to_goal') {
+            await this.emitFinancialEvent('GOAL_FUNDS_LOCKED', goalId, {
+                goal_id: goalId,
+                transaction_id: txId,
+                amount,
+                reference_id: referenceId,
+                state: 'SAVED_LOCKED',
+                source_wallet_id: metadata?.source_wallet_id || t.walletId || null
+            });
+        }
+
+        if (goalId && movement === 'withdraw_from_goal') {
+            await this.emitFinancialEvent('GOAL_FUNDS_RELEASED', goalId, {
+                goal_id: goalId,
+                transaction_id: txId,
+                amount,
+                reference_id: referenceId,
+                state: 'RELEASED',
+                destination_wallet_id: metadata?.destination_wallet_id || t.toWalletId || null,
+                security_verification: metadata?.security_verification || null
+            });
         }
     }
 
@@ -309,21 +436,14 @@ export class TransactionService {
         await this.logTransactionEvent(txId, null, 'created', 'system', { initial_status: t.status || 'completed' });
 
         // 3.7 EVENT SOURCING: Emit to financial_events
-        try {
-            await sb.from('financial_events').insert({
-                event_type: 'TRANSACTION_POSTED',
-                aggregate_id: txId,
-                payload: {
-                    amount: t.amount,
-                    type: t.type,
-                    wallet_id: t.walletId,
-                    to_wallet_id: t.toWalletId,
-                    reference_id: referenceId
-                }
-            });
-        } catch (e) {
-            console.error(`[Ledger] Event Sourcing failed for ${txId}:`, e);
-        }
+        await this.emitFinancialEvent('TRANSACTION_POSTED', txId, {
+            amount: t.amount,
+            type: t.type,
+            wallet_id: t.walletId,
+            to_wallet_id: t.toWalletId,
+            reference_id: referenceId
+        });
+        await this.emitPurposeLifecycleEvents(txId, t, referenceId);
 
         // 4. Trigger AML Risk Monitoring
         try {

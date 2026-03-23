@@ -35,7 +35,12 @@ export class CategoryService {
         }
 
         let items = Storage.getFromDB<any>(STORAGE_KEYS.CATEGORIES); 
-        items.push({ ...c, budget: encryptedBudget }); 
+        const index = items.findIndex((item: any) => String(item.id) === String(c.id));
+        if (index === -1) {
+            items.push({ ...c, budget: encryptedBudget });
+        } else {
+            items[index] = { ...items[index], ...c, budget: encryptedBudget };
+        }
         Storage.saveToDB(STORAGE_KEYS.CATEGORIES, items); 
         return { data: c, error: null }; 
     }
@@ -47,12 +52,21 @@ export class CategoryService {
         if (sb) {
             await sb.from('categories').update({ ...c, budget: encryptedBudget }).eq('id', c.id);
         }
+        let items = Storage.getFromDB<any>(STORAGE_KEYS.CATEGORIES);
+        const index = items.findIndex((item: any) => String(item.id) === String(c.id));
+        if (index !== -1) {
+            items[index] = { ...items[index], ...c, budget: encryptedBudget };
+            Storage.saveToDB(STORAGE_KEYS.CATEGORIES, items);
+        }
         return { error: null }; 
     }
 
     async deleteCategory(id: string) { 
         const sb = getSupabase();
         if (sb) await sb.from('categories').delete().eq('id', id);
+        let items = Storage.getFromDB<any>(STORAGE_KEYS.CATEGORIES);
+        items = items.filter((item: any) => String(item.id) !== String(id));
+        Storage.saveToDB(STORAGE_KEYS.CATEGORIES, items);
         return { error: null }; 
     }
 }
