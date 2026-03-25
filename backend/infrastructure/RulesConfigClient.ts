@@ -38,10 +38,11 @@ export class RulesConfigClient {
         const sb = getSupabase();
         if (sb) {
             try {
-                const [limitsRes, rulesRes, fxRes] = await Promise.all([
+                const [limitsRes, rulesRes, fxRes, commissionRes] = await Promise.all([
                     sb.from('infra_tx_limits').select('*').eq('id', 'MASTER_LIMITS').maybeSingle(),
                     sb.from('infra_system_matrix').select('config_data').eq('config_key', 'HEURISTIC_RULES').maybeSingle(),
-                    sb.from('infra_system_matrix').select('config_data').eq('config_key', 'FX_RATES').maybeSingle()
+                    sb.from('infra_system_matrix').select('config_data').eq('config_key', 'FX_RATES').maybeSingle(),
+                    sb.from('infra_system_matrix').select('config_data').eq('config_key', 'SERVICE_COMMISSIONS').maybeSingle()
                 ]);
                 
                 if (limitsRes.data && rulesRes.data) {
@@ -59,6 +60,7 @@ export class RulesConfigClient {
                         },
                         rules: rulesRes.data.config_data,
                         exchange_rates: fxRes.data?.config_data || this.getDefaultConfig().exchange_rates,
+                        commission_programs: commissionRes.data?.config_data || this.getDefaultConfig().commission_programs,
                         decision_matrix: this.getDefaultConfig().decision_matrix
                     };
                     
@@ -108,7 +110,7 @@ export class RulesConfigClient {
                 const { data: { session } } = await sb.auth.getSession();
                 const userId = session?.user?.id;
 
-                const { limits, rules, fxRates } = this.splitConfig(config);
+                const { limits, rules, fxRates, commissionPrograms } = this.splitConfig(config);
 
                 await Promise.all([
                     sb.from('infra_tx_limits').upsert({
@@ -126,6 +128,12 @@ export class RulesConfigClient {
                     sb.from('infra_system_matrix').upsert({
                         config_key: 'FX_RATES',
                         config_data: fxRates,
+                        updated_at: new Date().toISOString(),
+                        updated_by: userId
+                    }),
+                    sb.from('infra_system_matrix').upsert({
+                        config_key: 'SERVICE_COMMISSIONS',
+                        config_data: commissionPrograms,
                         updated_at: new Date().toISOString(),
                         updated_by: userId
                     })
@@ -152,7 +160,8 @@ export class RulesConfigClient {
                 }
             },
             rules: config.rules,
-            fxRates: config.exchange_rates
+            fxRates: config.exchange_rates,
+            commissionPrograms: config.commission_programs || this.getDefaultConfig().commission_programs
         };
     }
 
@@ -181,6 +190,21 @@ export class RulesConfigClient {
                 'ZAR': 19,
                 'NGN': 1500,
                 'GHS': 13.5
+            },
+            commission_programs: {
+                agent_referral: {
+                    enabled: true,
+                    rate: 0.0025,
+                    fixed_amount: 0,
+                    duration_days: 90
+                },
+                agent_cash: {
+                    enabled: true,
+                    deposit_rate: 0.001,
+                    deposit_fixed_amount: 0,
+                    withdrawal_rate: 0.0015,
+                    withdrawal_fixed_amount: 0
+                }
             },
             rules: {
                 "VL-001": { id: "VL-001", active: true, name: "Velocity Burst", severity: "HIGH", parameters: { threshold: 10 }, description: "High frequency transactional bursts" },

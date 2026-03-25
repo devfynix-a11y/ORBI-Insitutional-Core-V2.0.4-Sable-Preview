@@ -13,6 +13,27 @@ export type RedisTier = 'session' | 'fraud' | 'monitor';
 class RedisClusterFactory {
     private static instances: Map<RedisTier, Cluster | Redis> = new Map();
 
+    private static buildTlsOptions() {
+        if (process.env.REDIS_TLS_ENABLED !== 'true') return undefined;
+
+        const allowInsecureTls = process.env.REDIS_ALLOW_INSECURE_TLS === 'true';
+        const caPath = process.env.REDIS_CA_CERT_PATH;
+        const tlsOptions: any = {
+            rejectUnauthorized: !allowInsecureTls,
+        };
+
+        if (caPath && fs.existsSync(caPath)) {
+            tlsOptions.ca = fs.readFileSync(caPath);
+            tlsOptions.minVersion = 'TLSv1.3' as const;
+        }
+
+        if (allowInsecureTls) {
+            console.warn('[RedisFactory] REDIS_ALLOW_INSECURE_TLS=true. This should only be used in non-production environments.');
+        }
+
+        return tlsOptions;
+    }
+
     public static isAvailable(): boolean {
         return !!(process.env.REDIS_CLUSTER_NODES || process.env.REDIS_URL || process.env.REDIS_HOST);
     }
@@ -29,7 +50,7 @@ class RedisClusterFactory {
                 const client = new Redis(process.env.REDIS_URL, {
                     maxRetriesPerRequest: null,
                     enableReadyCheck: false,
-                    tls: process.env.REDIS_TLS_ENABLED === 'true' ? { rejectUnauthorized: false } : undefined
+                    tls: this.buildTlsOptions(),
                 });
 
                 client.on('error', (err) => {
@@ -54,26 +75,7 @@ class RedisClusterFactory {
 
             const username = process.env[`REDIS_USER_${tier.toUpperCase()}`];
             const password = process.env[`REDIS_PASS_${tier.toUpperCase()}`];
-            const caPath = process.env.REDIS_CA_CERT_PATH;
-
-            let tlsOptions: any = undefined;
-            
-            if (process.env.REDIS_TLS_ENABLED === 'true') {
-                tlsOptions = { rejectUnauthorized: false };
-            }
-
-            if (caPath && fs.existsSync(caPath)) {
-                try {
-                    tlsOptions = {
-                        ...tlsOptions,
-                        ca: fs.readFileSync(caPath),
-                        checkServerIdentity: () => undefined,
-                        minVersion: 'TLSv1.3' as const
-                    };
-                } catch (e: any) {
-                    console.error(`[RedisFactory] TLS Node failure during CA hydration: ${e.message}`);
-                }
-            }
+            const tlsOptions = this.buildTlsOptions();
 
             const cluster = new Cluster(nodes, {
                 dnsLookup: (address: string, callback: (err: Error | null, address: string, family?: number) => void) => callback(null, address),
@@ -113,6 +115,7 @@ class RedisClusterFactory {
                  host: process.env.REDIS_HOST,
                  port: parseInt(process.env.REDIS_PORT || '6379'),
                  password: process.env.REDIS_PASSWORD,
+                 tls: this.buildTlsOptions(),
              });
              
              client.on('error', (err) => {

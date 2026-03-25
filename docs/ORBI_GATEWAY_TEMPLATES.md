@@ -198,6 +198,87 @@ Ref: {{refId}}. ORBI Financial Technologies:
 ---
 
 ### 11. New Device Alert
+
+---
+
+### 12. Merchant Service Update
+**Template Name:** `Merchant_Service_Update`
+**Variables:** `actorLabel`, `amount`, `currency`, `status`, `refId`
+
+Used for merchant payment lifecycle notifications across:
+- SMS
+- Push
+- Email
+
+---
+
+### 13. Agent Cash Update
+**Template Name:** `Agent_Cash_Update`
+**Variables:** `actorLabel`, `amount`, `currency`, `direction`, `status`, `refId`
+
+Used for agent deposit and withdrawal lifecycle notifications across:
+- SMS
+- Push
+- Email
+
+---
+
+### 14. Agent Commission Paid
+**Template Name:** `Agent_Commission_Paid`
+**Variables:** `actorLabel`, `amount`, `currency`, `refId`
+
+Used when an agent commission payout is posted successfully.
+
+---
+
+### 15. Merchant Customer Payment Update
+**Template Name:** `Merchant_Customer_Payment_Update`
+**Variables:** `actorLabel`, `amount`, `currency`, `status`, `refId`
+
+Used for the customer side of a merchant-serviced payment so the payer or linked
+customer receives a dedicated ORBI message separate from the merchant operator.
+
+Side-by-side example:
+- Merchant receives: `Merchant_Service_Update`
+- Customer receives: `Merchant_Customer_Payment_Update`
+
+---
+
+### 16. Agent Customer Cash Update
+**Template Name:** `Agent_Customer_Cash_Update`
+**Variables:** `actorLabel`, `amount`, `currency`, `direction`, `status`, `refId`
+
+Used for the customer side of agent cash operations, including top-up and cash
+withdrawal handling.
+
+Side-by-side example:
+- Agent top-ups customer account:
+  - Agent receives `Agent_Cash_Update`
+  - Customer receives `Agent_Customer_Cash_Update`
+- Agent processes customer withdrawal:
+  - Agent receives `Agent_Cash_Update`
+  - Customer receives `Agent_Customer_Cash_Update`
+
+---
+
+### 17. Service Customer Registered
+**Template Name:** `Service_Customer_Registered`
+**Variables:** `actorLabel`, `customerName`, `refId`
+
+Used when a merchant or agent registers a customer and for the related
+customer-onboarding confirmation flow.
+
+---
+
+### 18. Service Access Approved
+**Template Name:** `Service_Access_Approved`
+**Variables:** `actorLabel`, `refId`
+
+Used when ORBI approves a public user's request to become a merchant or agent.
+
+---
+
+### 19. New Device Alert
 **Template Name:** `New_Device_Alert`
 **Variables:** `deviceName`, `location`, `timestamp`, `refId`
 
@@ -215,7 +296,7 @@ A new device ({{deviceName}}) has logged into your account from {{location}} at 
 
 ---
 
-### 11. Welcome Message
+### 20. Welcome Message
 **Template Name:** `Welcome_Message`
 **Variables:** `name`
 
@@ -233,7 +314,7 @@ Hello {{name}}, welcome to Orbi! Your account is now active. We are excited to h
 
 ---
 
-### 12. Promotional Message
+### 21. Promotional Message
 **Template Name:** `Promo_Message`
 **Variables:** `body`
 

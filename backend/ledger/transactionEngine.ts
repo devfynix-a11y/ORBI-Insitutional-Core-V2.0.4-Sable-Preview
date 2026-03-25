@@ -130,8 +130,8 @@ export class BankingEngineService {
                     this.completeSettlement(txId).catch(err => 
                         console.error(`[BankingEngine] Background Settlement Failed for ${txId}:`, err)
                     );
-                } else if (initialStatus === 'completed' && (type === 'INTERNAL_TRANSFER' || type === 'PEER_TRANSFER')) {
-                    // Direct transfer - send notifications in background
+                } else if (initialStatus === 'completed') {
+                    // Direct settlement - send participant notifications in background
                     this.sendTransferNotifications(txId).catch(err => 
                         console.error(`[BankingEngine] Background Notification Failed for ${txId}:`, err)
                     );
@@ -655,9 +655,6 @@ export class BankingEngineService {
             TransactionStateMachine.transition(txId, 'processing', 'completed', { settlement: true });
             await txService.updateTransactionStatus(txId, 'completed', 'Settlement finalized by processor.');
             
-            // Notification for both parties (Background)
-            this.sendTransferNotifications(txId, tx, amount).catch(() => {});
-
             Audit.log('FINANCIAL', tx.user_id, 'TRANSACTION_SETTLED', { txId }).catch(() => {});
             return true;
         } catch (e: any) {

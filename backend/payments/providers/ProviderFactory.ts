@@ -1,42 +1,23 @@
 
 import { IPaymentProvider } from './types.js';
-import { AirtelProvider } from './AirtelProvider.js';
-import { MpesaProvider } from './MpesaProvider.js';
 import { GenericRestProvider } from './GenericRestProvider.js';
 import { FinancialPartner } from '../../../types.js';
 
 export class ProviderFactory {
-    private static instances: Map<string, IPaymentProvider> = new Map();
+    private static registryProvider: IPaymentProvider | null = null;
 
     /**
-     * DYNAMIC PROVIDER RESOLVER
-     * Priority:
-     * 1. Specialized Class (Matched by name keywords)
-     * 2. Manual Logic Type Definition
-     * 3. Fallback to Generic REST
+     * REGISTRY-DRIVEN PROVIDER RESOLVER
+     * All provider behavior is loaded from the configured partner registry.
+     * No provider is selected by hardcoded class name matching.
      */
     public static getProvider(partner: FinancialPartner): IPaymentProvider {
-        const name = partner.name.toLowerCase();
-        
-        // 1. Specialized Routing
-        if (name.includes('airtel')) {
-            if (!this.instances.has('airtel')) this.instances.set('airtel', new AirtelProvider());
-            return this.instances.get('airtel')!;
+        if (!partner.mapping_config) {
+            throw new Error(`PROVIDER_REGISTRY_CONFIG_MISSING: ${partner.name}`);
         }
-
-        if (name.includes('mpesa') || name.includes('m-pesa')) {
-            if (!this.instances.has('mpesa')) this.instances.set('mpesa', new MpesaProvider());
-            return this.instances.get('mpesa')!;
+        if (!this.registryProvider) {
+            this.registryProvider = new GenericRestProvider();
         }
-
-        // 2. Metadata-Driven Logic Type
-        if (partner.logic_type === 'GENERIC_REST') {
-            if (!this.instances.has('generic')) this.instances.set('generic', new GenericRestProvider());
-            return this.instances.get('generic')!;
-        }
-
-        // 3. Absolute Fallback
-        if (!this.instances.has('generic')) this.instances.set('generic', new GenericRestProvider());
-        return this.instances.get('generic')!;
+        return this.registryProvider;
     }
 }

@@ -12,8 +12,19 @@ import { MerchantFabric } from './MerchantFabric.js';
 export class MpesaProvider implements IPaymentProvider {
     
     public async authenticate(partner: FinancialPartner): Promise<string> {
+        if (partner.token_cache && partner.token_expiry && partner.token_expiry > Date.now()) {
+            const cachedToken = await DataVault.decrypt(partner.token_cache);
+            if (typeof cachedToken === 'string' && cachedToken.trim().length > 0) {
+                return cachedToken;
+            }
+        }
+
         // M-Pesa uses Basic Auth to get a Bearer token
-        const auth = btoa(`${partner.client_id}:${await DataVault.decrypt(partner.client_secret || '')}`);
+        const decryptedSecret = await DataVault.decrypt(partner.client_secret || '');
+        if (!partner.client_id || !decryptedSecret || typeof decryptedSecret !== 'string') {
+            throw new Error('MPESA_CLIENT_CREDENTIALS_MISSING');
+        }
+        const auth = btoa(`${partner.client_id}:${decryptedSecret}`);
         
         console.info(`[M-Pesa] Requesting OAuth token for ${partner.name}`);
         

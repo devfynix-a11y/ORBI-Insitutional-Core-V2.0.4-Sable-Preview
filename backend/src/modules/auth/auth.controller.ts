@@ -18,18 +18,27 @@ import { ALLOWED_DOMAINS } from "../../../middleware/appTrust.js";
 const cleanAndroidHash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
 const EXPECTED_ANDROID_ORIGIN = cleanAndroidHash ? `android:apk-key-hash:${cleanAndroidHash}` : '';
 const ALLOWED_APK_HASHES = EXPECTED_ANDROID_ORIGIN ? [normalizeAndroidOrigin(EXPECTED_ANDROID_ORIGIN)] : [];
+const ALLOWED_IOS_BUNDLE_IDS = (process.env.ORBI_IOS_BUNDLE_IDS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
 const TRUSTED_APP_ORIGINS = [
     process.env.ORBI_MOBILE_ORIGIN,
+    process.env.ORBI_WEB_ORIGIN,
     process.env.ORBI_CORE_APP_ORIGIN,
     'ORBI_MOBILE_V2026',
+    'ORBI_INSTITUTIONAL_CORE_V2026',
     'OBI_INSTITUTIONAL_CORE_V25',
     'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
 
 const TRUSTED_APP_IDS = [
     process.env.ORBI_MOBILE_APP_ID,
+    process.env.ORBI_WEB_APP_ID,
     process.env.ORBI_CORE_APP_ID,
     'mobile-android',
+    'mobile-ios',
+    'ORBI_INSTITUTIONAL_CORE_V2026',
     'OBI_INSTITUTIONAL_CORE_V25',
     'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
@@ -45,6 +54,12 @@ const resolveTrustedAppIdentity = (req: Request) => {
         isTrustedOrigin,
         isTrustedApp: isTrustedOrigin && isTrustedId,
     };
+};
+
+const isTrustedIosBundleOrigin = (origin: string) => {
+    if (!origin.startsWith('ios:bundle-id:')) return false;
+    const bundleId = origin.replace('ios:bundle-id:', '').trim();
+    return bundleId.length > 0 && ALLOWED_IOS_BUNDLE_IDS.includes(bundleId);
 };
 
 const validateBiometricContext = (req: any) => {
@@ -108,7 +123,7 @@ const validateBiometricContext = (req: any) => {
 
     const isAndroidHash = origin.startsWith('android:apk-key-hash:');
     
-    const isIosBundle = origin.startsWith('ios:bundle-id:');
+    const isIosBundle = isTrustedIosBundleOrigin(origin);
     
     const isWebOrigin = origin.includes(finalRpId);
 
@@ -288,8 +303,33 @@ export class AuthController {
                 return res.status(403).json({ error: "Account takeover detected" });
             }
 
+            const userRecord = await sb!.auth.admin.getUserById(userId);
+            const authUser = userRecord.data?.user;
+            if (!authUser) {
+                throw new Error('IDENTITY_NOT_FOUND');
+            }
+
+            const userMetadata = authUser.user_metadata || {};
+            const sessionClaims = {
+                role: String(userMetadata.role || 'USER').trim().toUpperCase(),
+                app_origin: String(
+                    userMetadata.app_origin ||
+                    appIdentity ||
+                    process.env.ORBI_MOBILE_ORIGIN ||
+                    'ORBI_MOBILE_V2026'
+                ).trim(),
+                registry_type: String(userMetadata.registry_type || 'CONSUMER')
+                    .trim()
+                    .toUpperCase(),
+                email: authUser.email || undefined,
+            };
+
             // 6. Session Management (Secure Token Architecture via HSM)
-            const sessionToken = await HSM.generateSecureToken(userId, fingerprint);
+            const sessionToken = await HSM.generateSecureToken(
+                userId,
+                fingerprint,
+                sessionClaims,
+            );
             const refreshToken = Sessions.createRefreshToken(userId, fingerprint);
 
             // 7. Require Step-up if needed
@@ -299,8 +339,7 @@ export class AuthController {
                     // Skip OTP challenge for trusted device
                     decision = 'ALLOW';
                 } else {
-                    const { data } = await sb!.auth.admin.getUserById(userId);
-                    const contact = data?.user?.phone || data?.user?.email;
+                    const contact = authUser.phone || authUser.email;
                     
                     if (!contact) {
                         return res.status(403).json({ error: "High risk detected, but no contact method available for verification." });

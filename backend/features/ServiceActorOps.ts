@@ -1,0 +1,908 @@
+import { getAdminSupabase, getSupabase } from '../supabaseClient.js';
+import { ConfigClient } from '../infrastructure/RulesConfigClient.js';
+import { DataVault } from '../security/encryption.js';
+import { RegulatoryService } from '../../ledger/regulatoryService.js';
+import { UUID } from '../../services/utils.js';
+import type { AuthService } from '../../iam/authService.js';
+import type { User, UserRole } from '../../types.js';
+import { Messaging } from './MessagingService.js';
+
+type ServiceActorRole = 'MERCHANT' | 'AGENT';
+
+class ServiceActorOperations {
+    private getDb() {
+        return getAdminSupabase() || getSupabase();
+    }
+
+    private normalizeRole(role?: string): ServiceActorRole | null {
+        const normalized = String(role || '').toUpperCase();
+        if (normalized === 'MERCHANT' || normalized === 'AGENT') {
+            return normalized;
+        }
+        return null;
+    }
+
+    private isSettledStatus(status?: string) {
+        return ['completed', 'settled'].includes(String(status || '').toLowerCase());
+    }
+
+    private isFailedStatus(status?: string) {
+        const normalized = String(status || '').toLowerCase();
+        return (
+            normalized.includes('fail') ||
+            normalized.includes('reject') ||
+            normalized.includes('declin') ||
+            normalized.includes('cancel') ||
+            normalized.includes('reverse') ||
+            normalized.includes('error')
+        );
+    }
+
+    private async resolveDisplayName(userId?: string | null) {
+        const sb = this.getDb();
+        if (!sb || !userId) return null;
+
+        const { data: user } = await sb
+            .from('users')
+            .select('full_name, customer_id')
+            .eq('id', userId)
+            .maybeSingle();
+
+        if (user?.full_name || user?.customer_id) {
+            return user.full_name || user.customer_id;
+        }
+
+        const { data: staff } = await sb
+            .from('staff')
+            .select('full_name, email')
+            .eq('id', userId)
+            .maybeSingle();
+
+        return staff?.full_name || staff?.email || null;
+    }
+
+    private actorDeskLabel(role: ServiceActorRole) {
+        return role === 'MERCHANT' ? 'Merchant desk' : 'Agent desk';
+    }
+
+    private async notifyServiceCustomerRegistration(actorId: string, actorRole: ServiceActorRole, customerUserId: string) {
+        const customerName = (await this.resolveDisplayName(customerUserId)) || 'Customer';
+        const actorLabel = this.actorDeskLabel(actorRole);
+
+        await Promise.allSettled([
+            Messaging.dispatchServiceActivity(
+                actorId,
+                'SERVICE_CUSTOMER_REGISTERED',
+                { actorLabel, customerName },
+                'info',
+            ),
+            Messaging.dispatchServiceActivity(
+                customerUserId,
+                'SERVICE_CUSTOMER_ONBOARDED',
+                { actorLabel, customerName },
+                'info',
+            ),
+        ]);
+    }
+
+    private async notifyTransactionLifecycle(transaction: any, status: string) {
+        const metadata = transaction?.metadata || {};
+        const serviceContext = metadata.service_context;
+        const actorUserId = metadata.merchant_actor_id || metadata.agent_actor_id;
+        if (!actorUserId || !serviceContext) return;
+
+        const counterpartyUserId = await this.resolveCounterpartyUserId(transaction, actorUserId);
+
+        const amount =
+            Number(
+                typeof transaction.amount === 'string'
+                    ? await DataVault.decrypt(transaction.amount)
+                    : transaction.amount || 0,
+            ) || 0;
+
+        if (serviceContext === 'MERCHANT') {
+            const event = this.isSettledStatus(status)
+                ? 'MERCHANT_PAYMENT_COMPLETED'
+                : this.isFailedStatus(status)
+                  ? 'MERCHANT_PAYMENT_FAILED'
+                  : 'MERCHANT_PAYMENT_PENDING';
+
+            await Messaging.dispatchServiceActivity(actorUserId, event, {
+                actorLabel: this.actorDeskLabel('MERCHANT'),
+                amount,
+                currency: transaction.currency || 'TZS',
+                status,
+                refId: transaction.reference_id || transaction.referenceId || transaction.id,
+            });
+
+            if (counterpartyUserId && counterpartyUserId !== actorUserId) {
+                const customerEvent = this.isSettledStatus(status)
+                    ? 'MERCHANT_CUSTOMER_PAYMENT_COMPLETED'
+                    : this.isFailedStatus(status)
+                      ? 'MERCHANT_CUSTOMER_PAYMENT_FAILED'
+                      : 'MERCHANT_CUSTOMER_PAYMENT_PENDING';
+                await Messaging.dispatchServiceActivity(counterpartyUserId, customerEvent, {
+                    actorLabel: this.actorDeskLabel('MERCHANT'),
+                    amount,
+                    currency: transaction.currency || 'TZS',
+                    status,
+                    refId: transaction.reference_id || transaction.referenceId || transaction.id,
+                });
+            }
+            return;
+        }
+
+        if (serviceContext === 'AGENT_CASH') {
+            const event = this.isSettledStatus(status)
+                ? 'AGENT_CASH_COMPLETED'
+                : this.isFailedStatus(status)
+                  ? 'AGENT_CASH_FAILED'
+                  : 'AGENT_CASH_PENDING';
+
+            await Messaging.dispatchServiceActivity(actorUserId, event, {
+                actorLabel: this.actorDeskLabel('AGENT'),
+                amount,
+                currency: transaction.currency || 'TZS',
+                direction: metadata.cash_direction || 'deposit',
+                status,
+                refId: transaction.reference_id || transaction.referenceId || transaction.id,
+            });
+
+            if (counterpartyUserId && counterpartyUserId !== actorUserId) {
+                const customerEvent = this.isSettledStatus(status)
+                    ? 'AGENT_CUSTOMER_CASH_COMPLETED'
+                    : this.isFailedStatus(status)
+                      ? 'AGENT_CUSTOMER_CASH_FAILED'
+                      : 'AGENT_CUSTOMER_CASH_PENDING';
+                await Messaging.dispatchServiceActivity(counterpartyUserId, customerEvent, {
+                    actorLabel: this.actorDeskLabel('AGENT'),
+                    amount,
+                    currency: transaction.currency || 'TZS',
+                    direction: metadata.cash_direction || 'deposit',
+                    status,
+                    refId: transaction.reference_id || transaction.referenceId || transaction.id,
+                });
+            }
+        }
+    }
+
+    private async resolveCounterpartyUserId(transaction: any, actorUserId: string) {
+        const sb = this.getDb();
+        if (!sb) return null;
+
+        const candidateWalletIds = [transaction?.to_wallet_id, transaction?.wallet_id, transaction?.from_wallet_id]
+            .filter((value, index, arr) => Boolean(value) && arr.indexOf(value) === index);
+
+        for (const walletId of candidateWalletIds) {
+            const { data: wallet } = await sb
+                .from('wallets')
+                .select('user_id')
+                .eq('id', walletId)
+                .maybeSingle();
+
+            if (wallet?.user_id && wallet.user_id !== actorUserId) {
+                return wallet.user_id;
+            }
+        }
+
+        return null;
+    }
+
+    private async resolvePrimaryWallet(userId: string) {
+        const sb = this.getDb();
+        if (!sb) return null;
+
+        const { data } = await sb
+            .from('wallets')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('status', 'active')
+            .order('is_primary', { ascending: false })
+            .order('created_at', { ascending: true })
+            .limit(1);
+
+        return data?.[0] || null;
+    }
+
+    private async ensureMerchantProfile(actor: any) {
+        const sb = this.getDb();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const actorId = actor?.id || actor?.sub;
+        const businessName =
+            actor?.user_metadata?.business_name ||
+            actor?.user_metadata?.merchant_name ||
+            actor?.full_name ||
+            actor?.user_metadata?.full_name ||
+            'Merchant Account';
+
+        const { data: existing } = await sb
+            .from('merchants')
+            .select('*')
+            .eq('owner_user_id', actorId)
+            .maybeSingle();
+
+        if (existing) return existing;
+
+        const payload = {
+            business_name: businessName,
+            owner_user_id: actorId,
+            status: 'active',
+            metadata: {
+                actor_role: 'MERCHANT',
+                business_type: actor?.user_metadata?.business_type || 'general',
+            },
+        };
+
+        const { data, error } = await sb.from('merchants').insert(payload).select('*').single();
+        if (error) throw new Error(`MERCHANT_PROFILE_CREATE_FAILED: ${error.message}`);
+        return data;
+    }
+
+    private async ensureAgentProfile(actor: any) {
+        const sb = this.getDb();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const actorId = actor?.id || actor?.sub;
+        const displayName =
+            actor?.user_metadata?.agency_name ||
+            actor?.full_name ||
+            actor?.user_metadata?.full_name ||
+            'Agent Operator';
+
+        const { data: existing } = await sb
+            .from('agents')
+            .select('*')
+            .eq('user_id', actorId)
+            .maybeSingle();
+
+        if (existing) return existing;
+
+        const { data, error } = await sb
+            .from('agents')
+            .insert({
+                user_id: actorId,
+                display_name: displayName,
+                status: 'active',
+                commission_enabled: true,
+                metadata: {
+                    actor_role: 'AGENT',
+                    branch: actor?.user_metadata?.branch || null,
+                },
+            })
+            .select('*')
+            .single();
+
+        if (error) throw new Error(`AGENT_PROFILE_CREATE_FAILED: ${error.message}`);
+        return data;
+    }
+
+    private async syncMerchantWallets(userId: string) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        const merchant = await this.ensureMerchantProfile({ id: userId });
+        const { data: baseWallets } = await sb
+            .from('wallets')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('status', 'active');
+
+        for (const wallet of baseWallets || []) {
+            const { data: existing } = await sb
+                .from('merchant_wallets')
+                .select('id')
+                .eq('merchant_id', merchant.id)
+                .eq('base_wallet_id', wallet.id)
+                .maybeSingle();
+
+            const payload = {
+                merchant_id: merchant.id,
+                owner_user_id: userId,
+                base_wallet_id: wallet.id,
+                name: wallet.name,
+                wallet_type: wallet.type || 'operating',
+                is_primary: wallet.is_primary === true,
+                balance: Number(wallet.balance || 0),
+                currency: wallet.currency || 'TZS',
+                status: wallet.status || 'active',
+                metadata: {
+                    management_tier: wallet.management_tier,
+                    source_wallet_id: wallet.id,
+                },
+                updated_at: new Date().toISOString(),
+            };
+
+            if (existing?.id) {
+                await sb.from('merchant_wallets').update(payload).eq('id', existing.id);
+            } else {
+                await sb.from('merchant_wallets').insert(payload);
+            }
+        }
+
+        const { data } = await sb
+            .from('merchant_wallets')
+            .select('*')
+            .eq('owner_user_id', userId)
+            .order('is_primary', { ascending: false })
+            .order('created_at', { ascending: true });
+
+        return data || [];
+    }
+
+    private async syncAgentWallets(userId: string) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        const agent = await this.ensureAgentProfile({ id: userId });
+        const { data: baseWallets } = await sb
+            .from('wallets')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('status', 'active');
+
+        for (const wallet of baseWallets || []) {
+            const { data: existing } = await sb
+                .from('agent_wallets')
+                .select('id')
+                .eq('agent_id', agent.id)
+                .eq('base_wallet_id', wallet.id)
+                .maybeSingle();
+
+            const payload = {
+                agent_id: agent.id,
+                owner_user_id: userId,
+                base_wallet_id: wallet.id,
+                name: wallet.name,
+                wallet_type: wallet.type || 'operating',
+                is_primary: wallet.is_primary === true,
+                balance: Number(wallet.balance || 0),
+                currency: wallet.currency || 'TZS',
+                status: wallet.status || 'active',
+                metadata: {
+                    management_tier: wallet.management_tier,
+                    source_wallet_id: wallet.id,
+                },
+                updated_at: new Date().toISOString(),
+            };
+
+            if (existing?.id) {
+                await sb.from('agent_wallets').update(payload).eq('id', existing.id);
+            } else {
+                await sb.from('agent_wallets').insert(payload);
+            }
+        }
+
+        const { data } = await sb
+            .from('agent_wallets')
+            .select('*')
+            .eq('owner_user_id', userId)
+            .order('is_primary', { ascending: false })
+            .order('created_at', { ascending: true });
+
+        return data || [];
+    }
+
+    public async getMerchantWallets(userId: string) {
+        return this.syncMerchantWallets(userId);
+    }
+
+    public async getAgentWallets(userId: string) {
+        return this.syncAgentWallets(userId);
+    }
+
+    public async getMerchantTransactions(userId: string, limit = 50, offset = 0) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        const { data } = await sb
+            .from('merchant_transactions')
+            .select('*')
+            .eq('owner_user_id', userId)
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        return data || [];
+    }
+
+    public async getAgentTransactions(userId: string, limit = 50, offset = 0) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        const { data } = await sb
+            .from('agent_transactions')
+            .select('*')
+            .eq('owner_user_id', userId)
+            .order('created_at', { ascending: false })
+            .range(offset, offset + limit - 1);
+
+        return data || [];
+    }
+
+    public async registerCustomerByActor(
+        actor: any,
+        actorRole: ServiceActorRole,
+        payload: any,
+        auth: AuthService,
+    ) {
+        const sb = this.getDb();
+        if (!sb) throw new Error('DB_OFFLINE');
+
+        const actorId = actor?.id || actor?.sub;
+        const actorMetadata = actor?.user_metadata || {};
+        const appOrigin =
+            actorMetadata.app_origin === 'ORBI_MOBILE_V2026' || actorMetadata.app_origin === 'OBI_MOBILE_V1'
+                ? 'ORBI_MOBILE_V2026'
+                : 'ORBI_INSTITUTIONAL_CORE_V2026';
+
+        const result = await auth.signUp(payload.email || '', payload.password, {
+            full_name: payload.full_name,
+            phone: payload.phone,
+            nationality: payload.nationality,
+            address: payload.address,
+            currency: payload.currency || 'TZS',
+            language: payload.language || 'en',
+            role: 'USER',
+            registry_type: 'CONSUMER',
+            app_origin: appOrigin,
+            created_by_actor_id: actorId,
+            created_by_actor_role: actorRole,
+            created_via_service_actor: true,
+        });
+
+        if (result?.error) {
+            throw new Error(result.error.message || result.error);
+        }
+
+        const createdUserId = result?.data?.user?.id;
+        if (!createdUserId) {
+            throw new Error('CUSTOMER_REGISTRATION_FAILED');
+        }
+
+        const { data: createdProfile } = await sb
+            .from('users')
+            .select('id, customer_id')
+            .eq('id', createdUserId)
+            .single();
+
+        const commissionConfig = await this.getCommissionConfig();
+        const referralDays = Number(commissionConfig.agent_referral?.duration_days || 0);
+        const commissionExpiry =
+            actorRole === 'AGENT' && referralDays > 0
+                ? new Date(Date.now() + referralDays * 86400000).toISOString()
+                : null;
+
+        await sb.from('service_actor_customer_links').upsert(
+            {
+                actor_user_id: actorId,
+                actor_role: actorRole,
+                actor_registry_type: actorRole,
+                customer_user_id: createdUserId,
+                customer_customer_id: createdProfile?.customer_id || null,
+                relationship_type: actorRole === 'AGENT' ? 'agent_registered_customer' : 'merchant_registered_customer',
+                status: 'active',
+                commission_enabled: actorRole === 'AGENT',
+                commission_started_at: new Date().toISOString(),
+                commission_expires_at: commissionExpiry,
+                metadata: {
+                    created_from_role: actorRole,
+                    channel: 'service_actor_registration',
+                },
+                created_by: actorId,
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'actor_user_id,customer_user_id' },
+        );
+
+        await this.notifyServiceCustomerRegistration(actorId, actorRole, createdUserId);
+
+        return {
+            user: result.data.user,
+            session: result.data.session || null,
+            linked_customer: createdProfile,
+            commission_expires_at: commissionExpiry,
+        };
+    }
+
+    public async getLinkedCustomers(actorUserId?: string, actorRole?: string) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        let query = sb
+            .from('service_actor_customer_links')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (actorUserId) {
+            query = query.eq('actor_user_id', actorUserId);
+        }
+        if (actorRole) {
+            query = query.eq('actor_role', actorRole);
+        }
+
+        const { data: links } = await query;
+        const customerIds = [...new Set((links || []).map((link: any) => link.customer_user_id).filter(Boolean))];
+        const { data: customers } =
+            customerIds.length > 0
+                ? await sb.from('users').select('id,full_name,email,phone,customer_id,account_status,kyc_status').in('id', customerIds)
+                : { data: [] as any[] };
+
+        const customerMap = new Map((customers || []).map((customer: any) => [customer.id, customer]));
+        return (links || []).map((link: any) => ({
+            ...link,
+            customer: customerMap.get(link.customer_user_id) || null,
+        }));
+    }
+
+    public async getServiceCommissions(actorUserId?: string, actorRole?: string) {
+        const sb = this.getDb();
+        if (!sb) return [];
+
+        let query = sb
+            .from('service_commissions')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (actorUserId) {
+            query = query.eq('actor_user_id', actorUserId);
+        }
+        if (actorRole) {
+            query = query.eq('actor_role', actorRole);
+        }
+
+        const { data } = await query;
+        return data || [];
+    }
+
+    private async getCommissionConfig() {
+        const config = await ConfigClient.getRuleConfig();
+        return config?.commission_programs || {};
+    }
+
+    public async handleTransactionPosted(actor: any, payload: any, transaction: any) {
+        try {
+            await this.syncOperationalTables(transaction);
+            await this.stageTransactionCommissions(actor, payload, transaction);
+        } catch (e: any) {
+            console.error(`[ServiceActorOps] Post-transaction hook failed for ${transaction?.id}: ${e.message}`);
+        }
+    }
+
+    public async handleTransactionStatusChange(txId: string, status: string) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        const { data: tx } = await sb.from('transactions').select('*').eq('id', txId).maybeSingle();
+        if (!tx) return;
+
+        await this.syncOperationalTables(tx);
+        await this.notifyTransactionLifecycle(tx, status);
+
+        if (!this.isSettledStatus(status)) {
+            return;
+        }
+
+        await this.finalizePendingCommissions(tx);
+    }
+
+    private async syncOperationalTables(transaction: any) {
+        const serviceContext = transaction?.metadata?.service_context;
+        if (serviceContext === 'MERCHANT') {
+            await this.upsertMerchantTransaction(transaction);
+        }
+        if (serviceContext === 'AGENT_CASH') {
+            await this.upsertAgentTransaction(transaction);
+        }
+    }
+
+    private async upsertMerchantTransaction(transaction: any) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        const ownerUserId = transaction?.metadata?.merchant_actor_id || transaction?.user_id;
+        if (!ownerUserId) return;
+
+        const merchant = await this.ensureMerchantProfile({ id: ownerUserId });
+        const wallets = await this.syncMerchantWallets(ownerUserId);
+        const primaryWallet =
+            wallets.find((wallet: any) => wallet.base_wallet_id === transaction.wallet_id) ||
+            wallets.find((wallet: any) => wallet.is_primary) ||
+            wallets[0];
+
+        await sb.from('merchant_transactions').upsert(
+            {
+                transaction_id: transaction.id,
+                merchant_id: merchant.id,
+                owner_user_id: ownerUserId,
+                merchant_wallet_id: primaryWallet?.id || null,
+                customer_user_id: transaction.user_id,
+                direction:
+                    transaction.type === 'withdrawal' || transaction.type === 'expense' ? 'outbound' : 'inbound',
+                amount: Number(await DataVault.decrypt(transaction.amount || 0)),
+                currency: transaction.currency || 'TZS',
+                status: transaction.status,
+                service_type: 'merchant_payment',
+                metadata: transaction.metadata || {},
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'transaction_id' },
+        );
+    }
+
+    private async upsertAgentTransaction(transaction: any) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        const ownerUserId = transaction?.metadata?.agent_actor_id || transaction?.user_id;
+        if (!ownerUserId) return;
+
+        const agent = await this.ensureAgentProfile({ id: ownerUserId });
+        const wallets = await this.syncAgentWallets(ownerUserId);
+        const primaryWallet =
+            wallets.find((wallet: any) => wallet.base_wallet_id === transaction.wallet_id) ||
+            wallets.find((wallet: any) => wallet.is_primary) ||
+            wallets[0];
+
+        await sb.from('agent_transactions').upsert(
+            {
+                transaction_id: transaction.id,
+                agent_id: agent.id,
+                owner_user_id: ownerUserId,
+                agent_wallet_id: primaryWallet?.id || null,
+                customer_user_id: transaction.user_id,
+                direction: transaction?.metadata?.cash_direction === 'withdrawal' ? 'outbound' : 'inbound',
+                amount: Number(await DataVault.decrypt(transaction.amount || 0)),
+                currency: transaction.currency || 'TZS',
+                status: transaction.status,
+                service_type:
+                    transaction?.metadata?.cash_direction === 'withdrawal'
+                        ? 'agent_cash_withdrawal'
+                        : 'agent_cash_deposit',
+                metadata: transaction.metadata || {},
+                updated_at: new Date().toISOString(),
+            },
+            { onConflict: 'transaction_id' },
+        );
+    }
+
+    private async stageTransactionCommissions(actor: any, payload: any, transaction: any) {
+        const actorRole = this.normalizeRole(actor?.role || actor?.user_metadata?.role);
+        const serviceContext = payload?.metadata?.service_context || transaction?.metadata?.service_context;
+
+        if (serviceContext === 'AGENT_CASH' && actorRole === 'AGENT') {
+            await this.createOrFinalizeCommission(transaction, actor.id, 'AGENT', 'AGENT_CASH');
+            return;
+        }
+
+        const referralLink = await this.getActiveReferralLink(transaction?.user_id);
+        if (!referralLink) {
+            return;
+        }
+
+        await this.createOrFinalizeCommission(transaction, referralLink.actor_user_id, 'AGENT', 'AGENT_REFERRAL', referralLink);
+    }
+
+    private async getActiveReferralLink(customerUserId?: string) {
+        const sb = this.getDb();
+        if (!sb || !customerUserId) return null;
+
+        const now = new Date().toISOString();
+        const { data } = await sb
+            .from('service_actor_customer_links')
+            .select('*')
+            .eq('customer_user_id', customerUserId)
+            .eq('actor_role', 'AGENT')
+            .eq('status', 'active')
+            .eq('commission_enabled', true)
+            .or(`commission_expires_at.is.null,commission_expires_at.gte.${now}`)
+            .order('created_at', { ascending: true })
+            .limit(1);
+
+        return data?.[0] || null;
+    }
+
+    private async createOrFinalizeCommission(
+        transaction: any,
+        actorUserId: string,
+        actorRole: ServiceActorRole,
+        commissionMode: 'AGENT_REFERRAL' | 'AGENT_CASH',
+        referralLink?: any,
+    ) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        const existing = await sb
+            .from('service_commissions')
+            .select('*')
+            .eq('source_transaction_id', transaction.id)
+            .eq('actor_user_id', actorUserId)
+            .eq('commission_type', commissionMode)
+            .maybeSingle();
+
+        const sourceAmount = Number(
+            typeof transaction.amount === 'string' ? await DataVault.decrypt(transaction.amount) : transaction.amount || 0,
+        );
+        const config = await this.getCommissionConfig();
+
+        let rate = 0;
+        let fixedAmount = 0;
+        let effectiveUntil: string | null = null;
+
+        if (commissionMode === 'AGENT_REFERRAL') {
+            rate = Number(config.agent_referral?.rate || 0);
+            fixedAmount = Number(config.agent_referral?.fixed_amount || 0);
+            effectiveUntil = referralLink?.commission_expires_at || null;
+        } else {
+            const direction = transaction?.metadata?.cash_direction === 'withdrawal' ? 'withdrawal' : 'deposit';
+            rate = Number(
+                direction === 'withdrawal'
+                    ? config.agent_cash?.withdrawal_rate || 0
+                    : config.agent_cash?.deposit_rate || 0,
+            );
+            fixedAmount = Number(
+                direction === 'withdrawal'
+                    ? config.agent_cash?.withdrawal_fixed_amount || 0
+                    : config.agent_cash?.deposit_fixed_amount || 0,
+            );
+        }
+
+        const commissionAmount = Math.max(0, Number((sourceAmount * rate + fixedAmount).toFixed(2)));
+        if (commissionAmount <= 0) {
+            return;
+        }
+
+        const payload = {
+            actor_user_id: actorUserId,
+            actor_role: actorRole,
+            customer_user_id: referralLink?.customer_user_id || transaction.user_id || null,
+            source_transaction_id: transaction.id,
+            commission_type: commissionMode,
+            amount: commissionAmount,
+            currency: transaction.currency || 'TZS',
+            rate,
+            fixed_amount: fixedAmount,
+            status: this.isSettledStatus(transaction.status) ? 'ready_for_payout' : 'pending_source_settlement',
+            effective_from: new Date().toISOString(),
+            effective_until: effectiveUntil,
+            metadata: {
+                source_transaction_status: transaction.status,
+                source_transaction_type: transaction.type,
+                source_context: transaction?.metadata?.service_context || null,
+                referral_link_id: referralLink?.id || null,
+            },
+            updated_at: new Date().toISOString(),
+        };
+
+        const commission = existing.data?.id
+            ? (
+                  await sb
+                      .from('service_commissions')
+                      .update(payload)
+                      .eq('id', existing.data.id)
+                      .select('*')
+                      .single()
+              ).data
+            : (
+                  await sb
+                      .from('service_commissions')
+                      .insert(payload)
+                      .select('*')
+                      .single()
+              ).data;
+
+        if (this.isSettledStatus(transaction.status) && commission) {
+            await this.payoutCommission(commission);
+        }
+    }
+
+    private async finalizePendingCommissions(transaction: any) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        const { data: pending } = await sb
+            .from('service_commissions')
+            .select('*')
+            .eq('source_transaction_id', transaction.id)
+            .in('status', ['pending_source_settlement', 'ready_for_payout']);
+
+        for (const commission of pending || []) {
+            await this.payoutCommission(commission);
+        }
+    }
+
+    private async payoutCommission(commission: any) {
+        const sb = this.getDb();
+        if (!sb) return;
+
+        if (commission?.payout_transaction_id || commission?.status === 'paid') {
+            return;
+        }
+
+        const actorWallet = await this.resolvePrimaryWallet(commission.actor_user_id);
+        if (!actorWallet) {
+            await sb
+                .from('service_commissions')
+                .update({
+                    status: 'awaiting_wallet',
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', commission.id);
+            return;
+        }
+
+        const feeCollectorId = await RegulatoryService.resolveSystemNode('FEE_COLLECTOR');
+        const txReference = `COMM-${UUID.generateShortCode(12)}`;
+        const { TransactionService } = await import('../../ledger/transactionService.js');
+        const txService = new TransactionService();
+
+        await txService.postTransactionWithLedger(
+            {
+                referenceId: txReference,
+                user_id: commission.actor_user_id,
+                walletId: feeCollectorId,
+                toWalletId: actorWallet.id,
+                amount: Number(commission.amount),
+                currency: commission.currency || actorWallet.currency || 'TZS',
+                description: `Service commission payout for ${commission.commission_type}`,
+                type: 'fee',
+                status: 'completed',
+                date: new Date().toISOString(),
+                metadata: {
+                    service_context: 'SERVICE_COMMISSION',
+                    commission_id: commission.id,
+                    commission_type: commission.commission_type,
+                    source_transaction_id: commission.source_transaction_id,
+                    payout_to_user_id: commission.actor_user_id,
+                },
+            },
+            [
+                {
+                    transactionId: txReference,
+                    walletId: feeCollectorId,
+                    type: 'DEBIT',
+                    amount: Number(commission.amount),
+                    currency: commission.currency || actorWallet.currency || 'TZS',
+                    description: `Commission reserve release: ${commission.id}`,
+                    timestamp: new Date().toISOString(),
+                },
+                {
+                    transactionId: txReference,
+                    walletId: actorWallet.id,
+                    type: 'CREDIT',
+                    amount: Number(commission.amount),
+                    currency: commission.currency || actorWallet.currency || 'TZS',
+                    description: `Commission payout credit: ${commission.id}`,
+                    timestamp: new Date().toISOString(),
+                },
+            ],
+        );
+
+        const { data: payoutTx } = await sb
+            .from('transactions')
+            .select('id')
+            .eq('reference_id', txReference)
+            .maybeSingle();
+
+        await sb
+            .from('service_commissions')
+            .update({
+                payout_transaction_id: payoutTx?.id || null,
+                status: 'paid',
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', commission.id);
+
+        await Messaging.dispatchServiceActivity(
+            commission.actor_user_id,
+            'AGENT_COMMISSION_PAID',
+            {
+                actorLabel: this.actorDeskLabel('AGENT'),
+                amount: Number(commission.amount || 0),
+                currency: commission.currency || actorWallet.currency || 'TZS',
+            },
+            'info',
+        );
+    }
+}
+
+export const ServiceActorOps = new ServiceActorOperations();

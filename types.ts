@@ -371,7 +371,19 @@ export interface UserDocument {
     metadata?: any;
 }
 
-export type UserRole = 'SUPER_ADMIN' | 'ADMIN' | 'IT' | 'AUDIT' | 'ACCOUNTANT' | 'CUSTOMER_CARE' | 'CONSUMER' | 'USER' | 'SYSTEM' | 'HUMAN_RESOURCE';
+export type UserRole =
+    | 'SUPER_ADMIN'
+    | 'ADMIN'
+    | 'IT'
+    | 'AUDIT'
+    | 'ACCOUNTANT'
+    | 'CUSTOMER_CARE'
+    | 'CONSUMER'
+    | 'USER'
+    | 'MERCHANT'
+    | 'AGENT'
+    | 'SYSTEM'
+    | 'HUMAN_RESOURCE';
 
 export type Permission = 
     | 'auth.login' | 'auth.logout' | 'auth.refresh' | 'auth.pwd_reset'
@@ -382,7 +394,9 @@ export type Permission =
     | 'admin.approve' | 'admin.freeze' | 'admin.audit.read' | 'admin.user.manage'
     | 'system.wallet.credit' | 'system.wallet.debit' | 'goal.read' | 'goal.create' | 'goal.update' | 'goal.delete'
     | 'category.read' | 'category.create' | 'category.update' | 'category.delete'
-    | 'task.read' | 'task.create' | 'task.update' | 'task.delete';
+    | 'task.read' | 'task.create' | 'task.update' | 'task.delete'
+    | 'merchant.read' | 'merchant.create' | 'merchant.update' | 'merchant.settlement'
+    | 'agent.cash.deposit' | 'agent.cash.withdraw' | 'agent.float.manage';
 
 export interface UserActivity {
     id: string;
@@ -615,7 +629,45 @@ export interface RestEndpointConfig {
         status_field?: string;
         error_field?: string;
         balance_field?: string;
+        token_field?: string;
+        expires_in_field?: string;
+        message_field?: string;
     };
+}
+
+export interface ProviderAuthConfig extends RestEndpointConfig {
+    type?: 'oauth2_client_credentials' | 'api_key' | 'static_token' | 'none';
+    cache_ttl_seconds?: number;
+}
+
+export interface ProviderCallbackConfig {
+    reference_field?: string;
+    status_field?: string;
+    message_field?: string;
+    event_id_field?: string;
+    success_values?: Array<string | number>;
+    pending_values?: Array<string | number>;
+    failed_values?: Array<string | number>;
+    completed_values?: Array<string | number>;
+}
+
+export interface ProviderRegistryConfig {
+    auth?: ProviderAuthConfig;
+    endpoint?: string;
+    method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+    headers?: Record<string, string>;
+    payload_template?: Record<string, any>;
+    response_mapping?: {
+        id_field?: string;
+        status_field?: string;
+        error_field?: string;
+        message_field?: string;
+    };
+    stk_push?: RestEndpointConfig;
+    disbursement?: RestEndpointConfig;
+    check_status?: RestEndpointConfig;
+    balance?: RestEndpointConfig;
+    callback?: ProviderCallbackConfig;
 }
 
 export interface FinancialPartner {
@@ -627,26 +679,10 @@ export interface FinancialPartner {
     client_id?: string;
     client_secret?: string;
     api_base_url?: string;
+    webhook_secret?: string;
     status: 'ACTIVE' | 'INACTIVE';
-    logic_type: 'GENERIC_REST' | 'SPECIALIZED';
-    mapping_config?: {
-        // Single endpoint mode
-        endpoint?: string;
-        method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
-        headers?: Record<string, string>;
-        payload_template?: Record<string, any>;
-        response_mapping?: {
-            id_field?: string;
-            status_field?: string;
-            error_field?: string;
-        };
-
-        // Multi-endpoint mode
-        stk_push?: RestEndpointConfig;
-        disbursement?: RestEndpointConfig;
-        check_status?: RestEndpointConfig;
-        balance?: RestEndpointConfig;
-    };
+    logic_type: 'REGISTRY' | 'GENERIC_REST' | 'SPECIALIZED';
+    mapping_config?: ProviderRegistryConfig;
     token_cache?: string;
     token_expiry?: number;
     created_at: string;

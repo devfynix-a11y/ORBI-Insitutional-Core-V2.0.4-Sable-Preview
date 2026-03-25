@@ -66,6 +66,51 @@ export interface TemplatePayloads {
         amount: string | number;
         reason: string;
     };
+    Merchant_Service_Update: {
+        actorLabel: string;
+        amount: string | number;
+        currency: string;
+        status: string;
+        refId?: string;
+    };
+    Agent_Cash_Update: {
+        actorLabel: string;
+        amount: string | number;
+        currency: string;
+        direction: string;
+        status: string;
+        refId?: string;
+    };
+    Merchant_Customer_Payment_Update: {
+        actorLabel: string;
+        amount: string | number;
+        currency: string;
+        status: string;
+        refId?: string;
+    };
+    Agent_Customer_Cash_Update: {
+        actorLabel: string;
+        amount: string | number;
+        currency: string;
+        direction: string;
+        status: string;
+        refId?: string;
+    };
+    Agent_Commission_Paid: {
+        actorLabel: string;
+        amount: string | number;
+        currency: string;
+        refId?: string;
+    };
+    Service_Customer_Registered: {
+        actorLabel: string;
+        customerName: string;
+        refId?: string;
+    };
+    Service_Access_Approved: {
+        actorLabel: string;
+        refId?: string;
+    };
     LOW_BALANCE: {
         name: string;
         threshold: string | number;

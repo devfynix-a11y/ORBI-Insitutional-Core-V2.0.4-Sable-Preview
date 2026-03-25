@@ -51,6 +51,13 @@ DROP TABLE IF EXISTS public.treasury_approvers CASCADE;
 DROP TABLE IF EXISTS public.fee_collector_wallets CASCADE;
 DROP TABLE IF EXISTS public.merchant_fees CASCADE;
 DROP TABLE IF EXISTS public.merchant_settlements CASCADE;
+DROP TABLE IF EXISTS public.service_commissions CASCADE;
+DROP TABLE IF EXISTS public.service_access_requests CASCADE;
+DROP TABLE IF EXISTS public.service_actor_customer_links CASCADE;
+DROP TABLE IF EXISTS public.agent_transactions CASCADE;
+DROP TABLE IF EXISTS public.merchant_transactions CASCADE;
+DROP TABLE IF EXISTS public.agent_wallets CASCADE;
+DROP TABLE IF EXISTS public.agents CASCADE;
 DROP TABLE IF EXISTS public.merchant_wallets CASCADE;
 DROP TABLE IF EXISTS public.merchants CASCADE;
 DROP TABLE IF EXISTS public.app_registry CASCADE;
@@ -454,7 +461,11 @@ CREATE TABLE public.merchants (
 CREATE TABLE public.merchant_wallets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    base_wallet_id UUID,
     name TEXT NOT NULL,
+    wallet_type TEXT DEFAULT 'operating',
+    is_primary BOOLEAN DEFAULT FALSE,
     balance NUMERIC DEFAULT 0,
     currency TEXT DEFAULT 'TZS',
     status TEXT DEFAULT 'active',
@@ -486,6 +497,144 @@ CREATE TABLE public.merchant_fees (
 
 CREATE INDEX idx_merchants_owner_reset ON public.merchants(owner_user_id);
 CREATE INDEX idx_merchant_wallets_merchant_reset ON public.merchant_wallets(merchant_id);
+CREATE INDEX idx_merchant_wallets_owner_user_reset ON public.merchant_wallets(owner_user_id);
+
+CREATE TABLE public.agents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID UNIQUE REFERENCES public.users(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    commission_enabled BOOLEAN DEFAULT TRUE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.agent_wallets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id UUID REFERENCES public.agents(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    base_wallet_id UUID,
+    name TEXT NOT NULL,
+    wallet_type TEXT DEFAULT 'operating',
+    is_primary BOOLEAN DEFAULT FALSE,
+    balance NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'active',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.merchant_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID UNIQUE REFERENCES public.transactions(id) ON DELETE CASCADE,
+    merchant_id UUID REFERENCES public.merchants(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    merchant_wallet_id UUID REFERENCES public.merchant_wallets(id) ON DELETE SET NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    direction TEXT DEFAULT 'inbound',
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'pending',
+    service_type TEXT DEFAULT 'merchant_payment',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.agent_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    transaction_id UUID UNIQUE REFERENCES public.transactions(id) ON DELETE CASCADE,
+    agent_id UUID REFERENCES public.agents(id) ON DELETE CASCADE,
+    owner_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    agent_wallet_id UUID REFERENCES public.agent_wallets(id) ON DELETE SET NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    direction TEXT DEFAULT 'inbound',
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    status TEXT DEFAULT 'pending',
+    service_type TEXT DEFAULT 'agent_cash',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.service_actor_customer_links (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    actor_role TEXT NOT NULL,
+    actor_registry_type TEXT,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    customer_customer_id TEXT,
+    relationship_type TEXT DEFAULT 'sponsored_registration',
+    status TEXT DEFAULT 'active',
+    commission_enabled BOOLEAN DEFAULT TRUE,
+    commission_started_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    commission_expires_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_by UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.service_commissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    actor_role TEXT NOT NULL,
+    customer_user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    source_transaction_id UUID REFERENCES public.transactions(id) ON DELETE CASCADE,
+    payout_transaction_id UUID REFERENCES public.transactions(id) ON DELETE SET NULL,
+    commission_type TEXT NOT NULL,
+    amount NUMERIC DEFAULT 0,
+    currency TEXT DEFAULT 'TZS',
+    rate NUMERIC DEFAULT 0,
+    fixed_amount NUMERIC DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    effective_from TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    effective_until TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE public.service_access_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    requested_role TEXT NOT NULL,
+    requested_registry_type TEXT NOT NULL,
+    current_role TEXT,
+    current_registry_type TEXT,
+    status TEXT DEFAULT 'pending',
+    business_name TEXT,
+    phone TEXT,
+    submitted_via TEXT DEFAULT 'mobile_app',
+    note TEXT,
+    review_note TEXT,
+    reviewed_by UUID REFERENCES public.staff(id) ON DELETE SET NULL,
+    reviewed_at TIMESTAMP WITH TIME ZONE,
+    approved_at TIMESTAMP WITH TIME ZONE,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_service_actor_customer_unique_reset
+    ON public.service_actor_customer_links(actor_user_id, customer_user_id);
+CREATE INDEX idx_agents_user_reset ON public.agents(user_id);
+CREATE INDEX idx_agent_wallets_agent_reset ON public.agent_wallets(agent_id);
+CREATE INDEX idx_agent_wallets_owner_user_reset ON public.agent_wallets(owner_user_id);
+CREATE INDEX idx_merchant_transactions_owner_reset ON public.merchant_transactions(owner_user_id);
+CREATE INDEX idx_merchant_transactions_customer_reset ON public.merchant_transactions(customer_user_id);
+CREATE INDEX idx_agent_transactions_owner_reset ON public.agent_transactions(owner_user_id);
+CREATE INDEX idx_agent_transactions_customer_reset ON public.agent_transactions(customer_user_id);
+CREATE INDEX idx_service_links_actor_reset ON public.service_actor_customer_links(actor_user_id);
+CREATE INDEX idx_service_links_customer_reset ON public.service_actor_customer_links(customer_user_id);
+CREATE INDEX idx_service_commissions_actor_reset ON public.service_commissions(actor_user_id);
+CREATE INDEX idx_service_commissions_source_tx_reset ON public.service_commissions(source_transaction_id);
+CREATE INDEX idx_service_access_requests_user_reset ON public.service_access_requests(user_id);
+CREATE INDEX idx_service_access_requests_status_reset ON public.service_access_requests(status);
+CREATE INDEX idx_service_access_requests_role_reset ON public.service_access_requests(requested_role);
 
 CREATE TABLE public.regulatory_config (
     id TEXT PRIMARY KEY, 

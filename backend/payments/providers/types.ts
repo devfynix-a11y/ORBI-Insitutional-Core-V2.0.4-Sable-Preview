@@ -8,6 +8,14 @@ export interface ProviderResponse {
     rawPayload?: any;
 }
 
+export interface ProviderCallbackResult {
+    reference: string;
+    status: 'completed' | 'failed' | 'processing' | 'pending';
+    message: string;
+    providerEventId?: string;
+    rawStatus?: string;
+}
+
 /**
  * SOVEREIGN PROVIDER CONTRACT
  * Every external node (Airtel, M-Pesa, Bank) must implement this.
@@ -32,7 +40,11 @@ export interface IPaymentProvider {
      * Webhook Parsing
      * Translates provider-specific JSON into DilPesa standardized status.
      */
-    parseCallback(payload: any): { reference: string; status: 'completed' | 'failed'; message: string };
+    parseCallback(
+        payload: any,
+        partner?: FinancialPartner,
+        context?: { headers?: Record<string, string | undefined> },
+    ): ProviderCallbackResult;
 
     /**
      * Get current partner vault balance

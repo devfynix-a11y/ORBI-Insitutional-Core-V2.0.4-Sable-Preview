@@ -20,8 +20,9 @@ import { ConfigClient } from './backend/infrastructure/RulesConfigClient.js';
 import { 
     LoginSchema, SignUpSchema, PaymentIntentSchema, 
     WalletCreateSchema, GoalCreateSchema, GoalUpdateSchema, KYCSubmitSchema, KYCReviewSchema,
-    AccountStatusUpdateSchema, UserProfileUpdateSchema, StaffCreateSchema,
-    DeviceRegisterSchema, DeviceTrustSchema, DocumentUploadSchema, DocumentVerifySchema
+    AccountStatusUpdateSchema, UserProfileUpdateSchema, StaffCreateSchema, ManagedIdentityCreateSchema, BootstrapAdminSchema,
+    DeviceRegisterSchema, DeviceTrustSchema, DocumentUploadSchema, DocumentVerifySchema, ServiceCustomerRegistrationSchema,
+    ServiceAccessRequestCreateSchema, ServiceAccessRequestReviewSchema
 } from './backend/security/schemas.js';
 import { z } from 'zod';
 import { RedisClusterFactory } from './backend/infrastructure/RedisClusterFactory.js';
@@ -46,6 +47,7 @@ import { appTrustMiddleware } from './backend/middleware/appTrust.js';
 import { RecoveryService } from './services/security/recoveryService.js';
 import { OTPService } from './backend/security/otpService.js';
 import { Sessions } from './backend/src/modules/session/session.service.js';
+import { Messaging } from './backend/features/MessagingService.js';
 
 // Helper for Gemini calls with retry logic
 async function callGeminiWithRetry(ai: GoogleGenAI, params: any, retries = 3, delay = 1000): Promise<any> {
@@ -90,6 +92,21 @@ for (const key of requiredEnv) {
     }
 }
 
+if (process.env.NODE_ENV === 'production') {
+    if (
+        process.env.REDIS_TLS_ENABLED === 'true' &&
+        process.env.REDIS_ALLOW_INSECURE_TLS === 'true'
+    ) {
+        console.error('[Startup] CRITICAL_FAILURE: REDIS_ALLOW_INSECURE_TLS cannot be enabled in production.');
+        process.exit(1);
+    }
+
+    if (process.env.ORBI_ANDROID_APP_HASH && !process.env.ORBI_ANDROID_PACKAGE_NAME) {
+        console.error('[Startup] CRITICAL_FAILURE: ORBI_ANDROID_PACKAGE_NAME is required when ORBI_ANDROID_APP_HASH is configured.');
+        process.exit(1);
+    }
+}
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -109,8 +126,12 @@ app.set('trust proxy', 1);
 // Dynamically serve assetlinks.json to support Android App Passkeys on dynamic domains
 app.get('/.well-known/assetlinks.json', (req, res, next) => {
     const base64Hash = process.env.ORBI_ANDROID_APP_HASH?.replace(/['"]/g, '');
+    const packageName = process.env.ORBI_ANDROID_PACKAGE_NAME?.trim();
     if (!base64Hash) {
         return next(); // Fallback to static file if env var is missing
+    }
+    if (!packageName) {
+        return next();
     }
 
     let hexHash = '';
@@ -130,7 +151,7 @@ app.get('/.well-known/assetlinks.json', (req, res, next) => {
         ],
         "target": {
             "namespace": "android_app",
-            "package_name": "com.example.orbi_mobileapp",
+            "package_name": packageName,
             "sha256_cert_fingerprints": [hexHash]
         }
     }]);
@@ -148,16 +169,85 @@ app.use(express.static('public'));
 // 1. INFRASTRUCTURE SECURITY GATES
 const redisAvailable = RedisClusterFactory.isAvailable();
 const redisClient = redisAvailable ? RedisClusterFactory.getClient('monitor') : null;
+const allowProcessLocalIdempotency =
+    process.env.ORBI_ALLOW_PROCESS_LOCAL_IDEMPOTENCY === 'true';
+const gatewayBackgroundJobsEnabled =
+    process.env.ORBI_ENABLE_GATEWAY_BACKGROUND_JOBS !== 'false';
+const legacyApiGatewayEnabled =
+    process.env.ORBI_ENABLE_LEGACY_API_GATEWAY === 'true';
+const legacyBiometricAliasesEnabled =
+    process.env.ORBI_ENABLE_LEGACY_BIOMETRIC_ROUTES === 'true';
+const sandboxRoutesEnabled =
+    process.env.ORBI_ENABLE_SANDBOX_ROUTES === 'true';
+const messagingTestRoutesEnabled =
+    process.env.ORBI_ENABLE_MESSAGING_TEST_ROUTES === 'true';
+const idempotencyTtlSeconds = Number(process.env.ORBI_IDEMPOTENCY_TTL_SECONDS || 60 * 60);
 
-// IDEMPOTENCY CACHE (In-memory fallback, Redis preferred)
+// IDEMPOTENCY CACHE
+// Redis is authoritative. Process-local fallback is disabled by default because
+// it is unsafe in horizontally scaled runtimes.
 const idempotencyCache = new Map<string, { status: number, body: any }>();
 
+const resolveIdempotencyHeader = (req: Request) =>
+    req.header('Idempotency-Key') || req.header('x-idempotency-key');
+
+const readIdempotencyCache = async (key: string) => {
+    if (redisClient) {
+        try {
+            const cached = await redisClient.get(`idempotency:${key}`);
+            if (cached) {
+                return JSON.parse(String(cached)) as { status: number, body: any };
+            }
+        } catch (e) {
+            console.warn('[Idempotency] Redis read failed:', e);
+        }
+    }
+
+    if (allowProcessLocalIdempotency) {
+        return idempotencyCache.get(key);
+    }
+
+    return null;
+};
+
+const writeIdempotencyCache = async (
+    key: string,
+    value: { status: number, body: any },
+) => {
+    if (redisClient) {
+        try {
+            await redisClient.set(
+                `idempotency:${key}`,
+                JSON.stringify(value),
+                'EX',
+                idempotencyTtlSeconds,
+            );
+            return;
+        } catch (e) {
+            console.warn('[Idempotency] Redis write failed:', e);
+        }
+    }
+
+    if (!allowProcessLocalIdempotency) {
+        console.warn(
+            `[Idempotency] Redis unavailable and process-local fallback disabled. Key ${key} will not be cached.`,
+        );
+        return;
+    }
+
+    idempotencyCache.set(key, value);
+    if (idempotencyCache.size > 1000) {
+        const firstKey = idempotencyCache.keys().next().value;
+        if (firstKey !== undefined) idempotencyCache.delete(firstKey);
+    }
+};
+
 const idempotencyMiddleware = async (req: Request, res: Response, next: NextFunction) => {
-    const key = req.header('Idempotency-Key');
+    const key = resolveIdempotencyHeader(req);
     if (!key) return next();
 
     // Check if we've processed this key before
-    const cached = idempotencyCache.get(key);
+    const cached = await readIdempotencyCache(key);
     if (cached) {
         console.info(`[Idempotency] Duplicate request detected for key: ${key}`);
         return res.status(cached.status).json(cached.body);
@@ -166,12 +256,7 @@ const idempotencyMiddleware = async (req: Request, res: Response, next: NextFunc
     // Wrap res.json to cache the response
     const originalJson = res.json;
     res.json = function(body: any) {
-        idempotencyCache.set(key, { status: res.statusCode, body });
-        // Keep cache small for this demo
-        if (idempotencyCache.size > 1000) {
-            const firstKey = idempotencyCache.keys().next().value;
-            if (firstKey !== undefined) idempotencyCache.delete(firstKey);
-        }
+        void writeIdempotencyCache(key, { status: res.statusCode, body });
         return originalJson.call(this, body);
     };
 
@@ -248,24 +333,45 @@ app.use(cors({
             callback(new Error('Not allowed by CORS'));
         }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
         'Content-Type', 
+        'Accept',
         'Authorization', 
         'x-orbi-app-id', 
+        'x-orbi-app-origin',
+        'x-orbi-registry-type',
         'x-orbi-trace', 
         'x-idempotency-key',
-        'x-orbi-apk-hash'
+        'x-orbi-apk-hash',
+        'x-orbi-fingerprint',
+        'x-orbi-attestation',
+        'x-orbi-device-state'
     ]
 }));
 
-app.use(helmet());
+app.use(helmet({
+    hsts: process.env.NODE_ENV === 'production'
+        ? {
+            maxAge: 31536000,
+            includeSubDomains: true,
+            preload: true,
+        }
+        : false,
+}));
 
 // 2.5 APP TRUST GATEKEEPER
 // Ensures requests only come from official Orbi applications or trusted domains.
 app.use(appTrustMiddleware);
 
-app.use(express.json({ limit: '20mb' }) as any);
+app.use(express.json({
+    limit: '20mb',
+    verify: (req: any, _res, buf) => {
+        if (buf?.length) {
+            req.rawBody = buf.toString('utf8');
+        }
+    },
+}) as any);
 
 // WAF Deep Packet Inspection Middleware
 const wafInspect = async (req: Request, res: Response, next: NextFunction) => {
@@ -346,6 +452,84 @@ const authenticate = async (req: Request, res: Response, next: NextFunction) => 
     try {
         const session = await LogicCore.getSession(token || undefined);
         if (!session) throw new Error("IDENTITY_REQUIRED");
+
+        const appIdHeader = String(req.get('x-orbi-app-id') || '');
+        const appOriginHeader = String(req.get('x-orbi-app-origin') || '');
+        const roleHeader = String(req.get('x-orbi-user-role') || '').trim().toUpperCase();
+        const registryTypeHeader = String(req.get('x-orbi-registry-type') || '').trim().toUpperCase();
+        const sessionRole = String(
+            session.role ||
+            session.user?.role ||
+            session.user?.user_metadata?.role ||
+            'USER'
+        ).trim().toUpperCase();
+        const sessionOrigin = String(
+            session.user?.app_origin ||
+            session.user?.user_metadata?.app_origin ||
+            ''
+        ).trim();
+        const registryType = String(
+            session.user?.registry_type ||
+            session.user?.user_metadata?.registry_type ||
+            'CONSUMER'
+        ).trim().toUpperCase();
+
+        const institutionalIds = ['ORBI_INSTITUTIONAL_CORE_V2026', 'OBI_INSTITUTIONAL_CORE_V25', 'DPS_INSTITUTIONAL_CORE_V25'];
+        const mobileIds = ['mobile-android', 'mobile-ios'];
+        const institutionalOrigins = ['ORBI_INSTITUTIONAL_CORE_V2026', 'OBI_INSTITUTIONAL_CORE_V25', 'DPS_INSTITUTIONAL_CORE_V25'];
+        const mobileOrigins = ['ORBI_MOBILE_V2026', 'OBI_MOBILE_V1'];
+        const isInstitutionalNode = institutionalIds.includes(appIdHeader) || institutionalOrigins.includes(appOriginHeader);
+        const isMobileNode = mobileIds.includes(appIdHeader) || mobileOrigins.includes(appOriginHeader);
+
+        if (roleHeader && roleHeader !== sessionRole) {
+            return res.status(403).json({
+                success: false,
+                error: 'ROLE_HEADER_MISMATCH',
+                message: 'The declared user role header does not match the authenticated session role.',
+            });
+        }
+
+        if (registryTypeHeader && registryTypeHeader !== registryType) {
+            return res.status(403).json({
+                success: false,
+                error: 'REGISTRY_HEADER_MISMATCH',
+                message: 'The declared registry type header does not match the authenticated session registry type.',
+            });
+        }
+
+        if (isInstitutionalNode) {
+            if (!roleHeader) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'ROLE_HEADER_REQUIRED',
+                    message: 'Institutional requests must include x-orbi-user-role.',
+                });
+            }
+
+            if (!institutionalOrigins.includes(sessionOrigin)) {
+                return res.status(403).json({
+                    success: false,
+                    error: 'NODE_ORIGIN_MISMATCH',
+                    message: 'Institutional node access is limited to institutional identities.',
+                });
+            }
+
+            if (registryType !== 'STAFF') {
+                return res.status(403).json({
+                    success: false,
+                    error: 'STAFF_IDENTITY_REQUIRED',
+                    message: 'Institutional node access is reserved for staff identities.',
+                });
+            }
+        }
+
+        if (isMobileNode && registryType === 'STAFF') {
+            return res.status(403).json({
+                success: false,
+                error: 'CONSUMER_NODE_REQUIRED',
+                message: 'Staff identities cannot use the consumer mobile node.',
+            });
+        }
         
         // HARDENING: Enforce Account Status
         const status = session.user.user_metadata?.account_status || 'active';
@@ -362,12 +546,87 @@ const authenticate = async (req: Request, res: Response, next: NextFunction) => 
         await WAF.throttle(session.user.id, operation);
 
         (req as any).session = session;
+        (req as any).resolvedRole = sessionRole;
         next();
     } catch (err: any) {
         if (err.message.startsWith('RATE_LIMIT_EXCEEDED')) {
             return res.status(429).json({ success: false, error: 'RATE_LIMIT_EXCEEDED', message: err.message });
         }
         res.status(401).json({ success: false, error: 'AUTH_REQUIRED', message: err.message });
+    }
+};
+
+const resolveSessionRole = (session: any): string =>
+    String(
+        session?.role ||
+        session?.user?.role ||
+        session?.user?.user_metadata?.role ||
+        'USER'
+    ).trim().toUpperCase();
+
+const requireRole = (session: any, roles: string[]): boolean => {
+    return roles.includes(resolveSessionRole(session));
+};
+
+const resolveSessionRegistryType = (session: any): string =>
+    String(
+        session?.user?.registry_type ||
+        session?.user?.user_metadata?.registry_type ||
+        'CONSUMER'
+    ).trim().toUpperCase();
+
+const mapServiceRoleToRegistryType = (role: string): 'MERCHANT' | 'AGENT' => {
+    if (String(role).trim().toUpperCase() === 'AGENT') return 'AGENT';
+    return 'MERCHANT';
+};
+
+const syncUserIdentityClassification = async (
+    userId: string,
+    updates: { role: string; registryType: string; metadata?: Record<string, any> },
+) => {
+    const adminSb = getAdminSupabase();
+    if (!adminSb) throw new Error('DB_OFFLINE');
+
+    const normalizedRole = String(updates.role).trim().toUpperCase();
+    const normalizedRegistryType = String(updates.registryType).trim().toUpperCase();
+
+    const { data: authUserResult, error: authUserError } = await adminSb.auth.admin.getUserById(userId);
+    if (authUserError) throw new Error(authUserError.message);
+    const currentMetadata = authUserResult?.user?.user_metadata || {};
+
+    const { error: profileError } = await adminSb
+        .from('users')
+        .update({
+            role: normalizedRole,
+            registry_type: normalizedRegistryType,
+        })
+        .eq('id', userId);
+    if (profileError) throw new Error(profileError.message);
+
+    const { error: authUpdateError } = await adminSb.auth.admin.updateUserById(userId, {
+        user_metadata: {
+            ...currentMetadata,
+            role: normalizedRole,
+            registry_type: normalizedRegistryType,
+            ...(updates.metadata || {}),
+        },
+    });
+    if (authUpdateError) throw new Error(authUpdateError.message);
+
+    if (normalizedRole === 'AGENT') {
+        const { data: userRow } = await adminSb
+            .from('users')
+            .select('full_name')
+            .eq('id', userId)
+            .maybeSingle();
+
+        await adminSb.from('agents').upsert({
+            user_id: userId,
+            display_name: userRow?.full_name || 'Agent',
+            status: 'active',
+            commission_enabled: true,
+            metadata: updates.metadata || {},
+        }, { onConflict: 'user_id' });
     }
 };
 
@@ -417,6 +676,10 @@ app.get(['/health', '/heath'], async (req, res) => {
 let lastBrokerHeartbeat: any = null;
 
 app.post('/api/broker/heartbeat', (req, res) => {
+    const providedSecret = req.get('x-worker-secret') || req.get('x-orbi-worker-secret');
+    if (!providedSecret || providedSecret !== process.env.WORKER_SECRET) {
+        return res.status(403).json({ success: false, error: 'UNAUTHORIZED_WORKER' });
+    }
     lastBrokerHeartbeat = {
         ...req.body,
         receivedAt: new Date().toISOString()
@@ -818,27 +1081,29 @@ v1.post('/auth/passkey/register/finish', authenticate as any, (req, res) => NewA
 v1.post('/auth/passkey/login/start', (req, res) => NewAuth.startPasskeyLogin(req, res));
 v1.post('/auth/passkey/login/finish', (req, res) => NewAuth.completePasskeyLogin(req, res));
 
-// --- Legacy/Mobile App Aliases for Biometric Auth ---
-v1.post('/auth/biometric/register/start', authenticate as any, (req, res) => NewAuth.startPasskeyRegistration(req, res));
-v1.post('/auth/biometric/register/finish', authenticate as any, (req, res) => NewAuth.completePasskeyRegistration(req, res));
-v1.post('/auth/biometric/login/start', (req, res) => NewAuth.startPasskeyLogin(req, res));
-v1.post('/auth/biometric/login/finish', (req, res) => NewAuth.completePasskeyLogin(req, res));
+if (legacyBiometricAliasesEnabled) {
+    // --- Legacy/Mobile App Aliases for Biometric Auth ---
+    v1.post('/auth/biometric/register/start', authenticate as any, (req, res) => NewAuth.startPasskeyRegistration(req, res));
+    v1.post('/auth/biometric/register/finish', authenticate as any, (req, res) => NewAuth.completePasskeyRegistration(req, res));
+    v1.post('/auth/biometric/login/start', (req, res) => NewAuth.startPasskeyLogin(req, res));
+    v1.post('/auth/biometric/login/finish', (req, res) => NewAuth.completePasskeyLogin(req, res));
+
+    v1.post('/auth/biometric/cleanup', authenticate as any, async (req, res) => {
+        const session = (req as any).session;
+        const sb = getAdminSupabase();
+        if (!sb) return res.status(500).json({ error: "DB_OFFLINE" });
+        
+        const { data: user } = await sb.auth.admin.getUserById(session.sub);
+        const metadata = user?.user?.user_metadata || {};
+        delete metadata.authenticators;
+        delete metadata.currentChallenge;
+        
+        await sb.auth.admin.updateUserById(session.sub, { user_metadata: metadata });
+        res.json({ success: true, message: "Legacy biometric registrations cleaned." });
+    });
+}
 
 v1.post('/auth/behavior/record', authenticate as any, (req, res) => NewAuth.recordBehavior(req, res));
-
-v1.post('/auth/biometric/cleanup', authenticate as any, async (req, res) => {
-    const session = (req as any).session;
-    const sb = getAdminSupabase();
-    if (!sb) return res.status(500).json({ error: "DB_OFFLINE" });
-    
-    const { data: user } = await sb.auth.admin.getUserById(session.sub);
-    const metadata = user?.user?.user_metadata || {};
-    delete metadata.authenticators;
-    delete metadata.currentChallenge;
-    
-    await sb.auth.admin.updateUserById(session.sub, { user_metadata: metadata });
-    res.json({ success: true, message: "Legacy biometric registrations cleaned." });
-});
 
 // --- IAM Domain ---
 v1.get('/user/lookup/:customerId', authenticate as any, async (req, res) => {
@@ -1023,6 +1288,61 @@ v1.post('/auth/refresh', async (req, res) => {
     }
 });
 
+v1.post('/auth/logout', authenticate as any, async (req, res) => {
+    try {
+        const accessToken = req.headers.authorization?.startsWith('Bearer ')
+            ? req.headers.authorization.substring(7)
+            : undefined;
+        const refreshToken = typeof req.body?.refresh_token === 'string'
+            ? req.body.refresh_token
+            : undefined;
+
+        await LogicCore.logout(accessToken, refreshToken);
+        res.json({ success: true, data: { logged_out: true } });
+    } catch (e: any) {
+        console.error('[Auth] Logout Error:', e);
+        res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
+    }
+});
+
+function isInstitutionalNodeRequest(req: Request) {
+    const appId = String(req.headers['x-orbi-app-id'] || '');
+    const appOrigin = String(req.headers['x-orbi-app-origin'] || '');
+    const allowedIds = ['ORBI_INSTITUTIONAL_CORE_V2026', 'OBI_INSTITUTIONAL_CORE_V25', 'DPS_INSTITUTIONAL_CORE_V25'];
+    const allowedOrigins = ['ORBI_INSTITUTIONAL_CORE_V2026', 'OBI_INSTITUTIONAL_CORE_V25', 'DPS_INSTITUTIONAL_CORE_V25'];
+    return (
+        allowedIds.includes(appId) &&
+        allowedOrigins.includes(appOrigin)
+    );
+}
+
+v1.get('/auth/bootstrap-state', async (req, res) => {
+    if (!isInstitutionalNodeRequest(req)) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const state = await LogicCore.getBootstrapState();
+        res.json({ success: true, data: state });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
+    }
+});
+
+v1.post('/auth/bootstrap-admin', validate(BootstrapAdminSchema), async (req, res) => {
+    if (!isInstitutionalNodeRequest(req)) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.bootstrapAdmin(req.body);
+        if (result.error) {
+            return res.status(400).json({ success: false, error: result.error });
+        }
+        res.json({ success: true, data: result.data });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
+    }
+});
+
 v1.post('/auth/signup', validate(SignUpSchema), async (req, res) => {
     try {
         const appId = String(req.headers['x-orbi-app-id'] || 'anonymous');
@@ -1071,6 +1391,115 @@ v1.get('/user/profile', authenticate as any, async (req, res) => {
         res.json({ success: true, data: result.data });
     } catch (e: any) {
         console.error(`[User] Profile Get Error:`, e);
+        res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
+    }
+});
+
+v1.get('/service-access/requests/my', authenticate as any, async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        }
+
+        const { data, error } = await sb
+            .from('service_access_requests')
+            .select('*')
+            .eq('user_id', session.sub)
+            .order('created_at', { ascending: false });
+
+        if (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+
+        res.json({ success: true, data: data || [] });
+    } catch (e: any) {
+        console.error('[ServiceAccess] List My Requests Error:', e);
+        res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
+    }
+});
+
+v1.post('/service-access/requests', authenticate as any, validate(ServiceAccessRequestCreateSchema), async (req, res) => {
+    try {
+        const session = (req as any).session;
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        }
+
+        const currentRole = resolveSessionRole(session);
+        const currentRegistryType = resolveSessionRegistryType(session);
+        if (currentRegistryType === 'STAFF') {
+            return res.status(403).json({
+                success: false,
+                error: 'STAFF_INELIGIBLE',
+                message: 'Staff identities cannot request merchant or agent access through the consumer app.',
+            });
+        }
+
+        const requestedRole = String(req.body.requested_role || '').trim().toUpperCase();
+        const requestedRegistryType = mapServiceRoleToRegistryType(requestedRole);
+        if (currentRole === requestedRole && currentRegistryType === requestedRegistryType) {
+            return res.status(409).json({
+                success: false,
+                error: 'ROLE_ALREADY_ACTIVE',
+                message: `Your account already has ${requestedRole} access.`,
+            });
+        }
+
+        const { data: existingPending } = await sb
+            .from('service_access_requests')
+            .select('id')
+            .eq('user_id', session.sub)
+            .eq('requested_role', requestedRole)
+            .in('status', ['pending', 'under_review'])
+            .limit(1);
+
+        if (existingPending && existingPending.length > 0) {
+            return res.status(409).json({
+                success: false,
+                error: 'REQUEST_ALREADY_PENDING',
+                message: `A ${requestedRole.toLowerCase()} access request is already pending review.`,
+            });
+        }
+
+        const payload = {
+            user_id: session.sub,
+            requested_role: requestedRole,
+            requested_registry_type: requestedRegistryType,
+            current_role: currentRole,
+            current_registry_type: currentRegistryType,
+            business_name: req.body.business_name,
+            phone: req.body.phone || session.user?.phone || session.user?.user_metadata?.phone || null,
+            note: req.body.note,
+            submitted_via: 'mobile_app',
+            status: 'pending',
+            metadata: {
+                app_origin: session.user?.app_origin || session.user?.user_metadata?.app_origin,
+                ...(req.body.metadata || {}),
+            },
+        };
+
+        const { data, error } = await sb
+            .from('service_access_requests')
+            .insert(payload)
+            .select('*')
+            .single();
+
+        if (error) {
+            return res.status(500).json({ success: false, error: error.message });
+        }
+
+        await Audit.log('ADMIN', session.sub, 'SERVICE_ACCESS_REQUEST_SUBMITTED', {
+            requestId: data.id,
+            requestedRole,
+            requestedRegistryType,
+        });
+
+        res.status(201).json({ success: true, data });
+    } catch (e: any) {
+        console.error('[ServiceAccess] Create Request Error:', e);
         res.status(500).json({ success: false, error: 'INTERNAL_SERVER_ERROR', message: e.message });
     }
 });
@@ -1445,6 +1874,156 @@ v1.post('/admin/staff', authenticate as any, validate(StaffCreateSchema), async 
     }
 });
 
+v1.post('/admin/users/register', authenticate as any, validate(ManagedIdentityCreateSchema), async (req, res) => {
+    const session = (req as any).session;
+    const role = session.role || session.user?.role;
+    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.createManagedIdentity(req.body, session.sub);
+        if (result.error) return res.status(400).json({ success: false, error: result.error });
+        res.json({ success: true, data: result.data });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/admin/service-access/requests', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    const role = session.role || session.user?.role;
+    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN' && role !== 'CUSTOMER_CARE' && role !== 'AUDIT') {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        }
+
+        let query = sb
+            .from('service_access_requests')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        const status = String(req.query.status || '').trim();
+        const requestedRole = String(req.query.requestedRole || req.query.requested_role || '').trim().toUpperCase();
+        if (status) query = query.eq('status', status);
+        if (requestedRole) query = query.eq('requested_role', requestedRole);
+
+        const { data, error } = await query;
+        if (error) return res.status(500).json({ success: false, error: error.message });
+        res.json({ success: true, data: data || [] });
+    } catch (e: any) {
+        console.error('[Admin] Service Access Requests Error:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/admin/service-access/requests/:id/review', authenticate as any, validate(ServiceAccessRequestReviewSchema), async (req, res) => {
+    const session = (req as any).session;
+    const role = session.role || session.user?.role;
+    if (role !== 'ADMIN' && role !== 'SUPER_ADMIN') {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) {
+            return res.status(503).json({ success: false, error: 'DB_OFFLINE' });
+        }
+
+        const { data: existing, error: fetchError } = await sb
+            .from('service_access_requests')
+            .select('*')
+            .eq('id', req.params.id)
+            .maybeSingle();
+        if (fetchError) return res.status(500).json({ success: false, error: fetchError.message });
+        if (!existing) return res.status(404).json({ success: false, error: 'REQUEST_NOT_FOUND' });
+
+        const currentStatus = String(existing.status || '').toLowerCase();
+        if (currentStatus !== 'pending' && currentStatus !== 'under_review') {
+            return res.status(409).json({ success: false, error: 'REQUEST_ALREADY_RESOLVED' });
+        }
+
+        const decision = String(req.body.decision || '').trim().toUpperCase();
+        const reviewNote = req.body.review_note;
+        const now = new Date().toISOString();
+        const updatePayload: any = {
+            status: decision === 'APPROVED' ? 'approved' : 'rejected',
+            review_note: reviewNote || null,
+            reviewed_by: session.sub,
+            reviewed_at: now,
+            updated_at: now,
+        };
+
+        if (decision === 'APPROVED') {
+            updatePayload.approved_at = now;
+            await syncUserIdentityClassification(existing.user_id, {
+                role: existing.requested_role,
+                registryType: existing.requested_registry_type || mapServiceRoleToRegistryType(existing.requested_role),
+                metadata: {
+                    service_access_approved_at: now,
+                    service_access_approved_role: existing.requested_role,
+                },
+            });
+
+            await Messaging.dispatchServiceActivity(
+                existing.user_id,
+                'SERVICE_ACCESS_APPROVED',
+                {
+                    actorLabel: existing.requested_role === 'AGENT' ? 'Agent desk' : 'Merchant desk',
+                },
+                'info',
+            );
+        }
+
+        const { data, error } = await sb
+            .from('service_access_requests')
+            .update(updatePayload)
+            .eq('id', req.params.id)
+            .select('*')
+            .single();
+        if (error) return res.status(500).json({ success: false, error: error.message });
+
+        await Audit.log('ADMIN', session.sub, 'SERVICE_ACCESS_REQUEST_REVIEWED', {
+            requestId: req.params.id,
+            decision,
+            targetUserId: existing.user_id,
+            requestedRole: existing.requested_role,
+        });
+
+        res.json({ success: true, data });
+    } catch (e: any) {
+        console.error('[Admin] Service Access Review Error:', e);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/admin/service-links', authenticate as any, adminOnly as any, async (req, res) => {
+    try {
+        const actorRole = typeof req.query.actorRole === 'string' ? req.query.actorRole.toUpperCase() : undefined;
+        const actorUserId = typeof req.query.actorUserId === 'string' ? req.query.actorUserId : undefined;
+        const result = await LogicCore.getServiceLinkedCustomers(actorUserId, actorRole);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/admin/service-commissions', authenticate as any, adminOnly as any, async (req, res) => {
+    try {
+        const actorRole = typeof req.query.actorRole === 'string' ? req.query.actorRole.toUpperCase() : undefined;
+        const actorUserId = typeof req.query.actorUserId === 'string' ? req.query.actorUserId : undefined;
+        const result = await LogicCore.getServiceCommissions(actorUserId, actorRole);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 v1.patch('/admin/users/:id/status', authenticate as any, validate(AccountStatusUpdateSchema), async (req, res) => {
     const session = (req as any).session;
     const role = session.role || session.user?.role;
@@ -1477,7 +2056,7 @@ v1.patch('/admin/users/:id/profile', authenticate as any, validate(UserProfileUp
 });
 
 // --- Messaging Domain ---
-v1.post('/messaging/email', authenticate as any, async (req, res) => {
+if (messagingTestRoutesEnabled) v1.post('/messaging/email', authenticate as any, async (req, res) => {
     res.status(403).json({ success: false, error: 'EMAIL_SERVICE_DISABLED' });
 });
 
@@ -1485,14 +2064,30 @@ v1.post('/messaging/email', authenticate as any, async (req, res) => {
 v1.post('/webhooks/:partnerId', async (req, res) => {
     const { partnerId } = req.params;
     try {
-        // Webhooks are public endpoints but secured by provider signatures (handled inside handleCallback if needed)
-        // or by secret tokens in URL/headers.
-        // For now, we allow the call and let the handler validate.
-        await Webhooks.handleCallback(req.body, partnerId);
+        const signatureHeader =
+            req.get('x-signature') ||
+            req.get('x-webhook-signature') ||
+            req.get('x-orbi-signature') ||
+            undefined;
+        const eventId =
+            req.get('x-event-id') ||
+            req.get('x-webhook-id') ||
+            req.get('x-provider-event-id') ||
+            undefined;
+        await Webhooks.handleCallback(
+            req.body,
+            partnerId,
+            signatureHeader,
+            (req as any).rawBody,
+            eventId,
+        );
         res.json({ success: true });
     } catch (e: any) {
         console.error(`[Webhook] Error processing webhook for ${partnerId}:`, e);
-        res.status(500).json({ success: false, error: e.message });
+        const status = ['INVALID_SIGNATURE', 'MISSING_SIGNATURE', 'WEBHOOK_SECRET_NOT_CONFIGURED', 'REPLAY_DETECTED'].includes(e.message)
+            ? 403
+            : 500;
+        res.status(status).json({ success: false, error: e.message });
     }
 });
 
@@ -1518,6 +2113,9 @@ v1.get('/merchants', authenticate as any, async (req, res) => {
 // --- MULTI-TENANT MERCHANT ACCOUNTS ---
 v1.post('/merchants/accounts', authenticate as any, async (req, res) => {
     const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'CONSUMER', 'USER', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
     try {
         const result = await LogicCore.createMerchantAccount(session.sub, req.body);
         res.json({ success: true, data: result });
@@ -1528,6 +2126,9 @@ v1.post('/merchants/accounts', authenticate as any, async (req, res) => {
 
 v1.get('/merchants/accounts/my', authenticate as any, async (req, res) => {
     const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
     try {
         const result = await LogicCore.getUserMerchantAccounts(session.sub);
         res.json({ success: true, data: result });
@@ -1537,6 +2138,10 @@ v1.get('/merchants/accounts/my', authenticate as any, async (req, res) => {
 });
 
 v1.get('/merchants/accounts/:id', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
     try {
         const result = await LogicCore.getMerchantAccountById(req.params.id);
         res.json({ success: true, data: result });
@@ -1546,8 +2151,245 @@ v1.get('/merchants/accounts/:id', authenticate as any, async (req, res) => {
 });
 
 v1.patch('/merchants/accounts/:id/settlement', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
     try {
         const result = await LogicCore.updateMerchantSettlement(req.params.id, req.body);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/merchant/transactions', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    const limit = Number(req.query.limit || 50);
+    const offset = Number(req.query.offset || 0);
+    try {
+        const result = await LogicCore.getMerchantTransactions(session.sub, limit, offset);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/merchant/wallets', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getMerchantWallets(session.sub);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/merchant/customers/register', authenticate as any, validate(ServiceCustomerRegistrationSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.registerCustomerByServiceActor(session.user, 'MERCHANT', req.body);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/merchant/customers', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getServiceLinkedCustomers(session.sub, 'MERCHANT');
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/merchant/payments/preview', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.getTransactionPreview(session.sub, {
+            ...req.body,
+            metadata: {
+                ...(req.body.metadata || {}),
+                service_context: 'MERCHANT',
+            },
+        });
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/merchant/payments/settle', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['MERCHANT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    try {
+        const result = await LogicCore.processMerchantPayment(req.body, session.user);
+        if (!result.success) {
+            return res.status(400).json(result);
+        }
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/agent/transactions', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+
+    const limit = Number(req.query.limit || 50);
+    const offset = Number(req.query.offset || 0);
+    try {
+        const result = await LogicCore.getAgentTransactions(session.sub, limit, offset);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/agent/wallets', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getAgentWallets(session.sub);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/agent/customers/register', authenticate as any, validate(ServiceCustomerRegistrationSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.registerCustomerByServiceActor(session.user, 'AGENT', req.body);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(400).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/agent/customers', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getServiceLinkedCustomers(session.sub, 'AGENT');
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.get('/agent/commissions', authenticate as any, async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN', 'AUDIT', 'ACCOUNTANT'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getServiceCommissions(session.sub, 'AGENT');
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/agent/cash/deposit/preview', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getTransactionPreview(session.sub, {
+            ...req.body,
+            type: 'DEPOSIT',
+            metadata: {
+                ...(req.body.metadata || {}),
+                service_context: 'AGENT_CASH',
+                cash_direction: 'deposit',
+            },
+        });
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/agent/cash/deposit/settle', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.processAgentCashOperation(req.body, session.user, 'deposit');
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/agent/cash/withdraw/preview', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.getTransactionPreview(session.sub, {
+            ...req.body,
+            type: 'WITHDRAWAL',
+            metadata: {
+                ...(req.body.metadata || {}),
+                service_context: 'AGENT_CASH',
+                cash_direction: 'withdrawal',
+            },
+        });
+        if (!result.success) return res.status(400).json(result);
+        res.json({ success: true, data: result });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/agent/cash/withdraw/settle', authenticate as any, validate(PaymentIntentSchema), async (req, res) => {
+    const session = (req as any).session;
+    if (!requireRole(session, ['AGENT', 'ADMIN', 'SUPER_ADMIN'])) {
+        return res.status(403).json({ success: false, error: 'ACCESS_DENIED' });
+    }
+    try {
+        const result = await LogicCore.processAgentCashOperation(req.body, session.user, 'withdrawal');
+        if (!result.success) return res.status(400).json(result);
         res.json({ success: true, data: result });
     } catch (e: any) {
         res.status(500).json({ success: false, error: e.message });
@@ -2312,7 +3154,7 @@ import { SandboxController } from './backend/sandbox/sandboxController.js';
 // ... inside v1 routes ...
 
 // --- SANDBOX / DEMO TOOLS ---
-v1.post('/sandbox/fund', authenticate as any, async (req, res) => {
+if (sandboxRoutesEnabled) v1.post('/sandbox/fund', authenticate as any, async (req, res) => {
     const session = (req as any).session;
     
     // Default to current user if not provided
@@ -2329,7 +3171,7 @@ v1.post('/sandbox/fund', authenticate as any, async (req, res) => {
     await SandboxController.fundWallet(req, res);
 });
 
-v1.post('/sandbox/activate', authenticate as any, async (req, res) => {
+if (sandboxRoutesEnabled) v1.post('/sandbox/activate', authenticate as any, async (req, res) => {
     const session = (req as any).session;
     
     // Default to current user if not provided
@@ -2580,6 +3422,32 @@ v1.post('/admin/config/ledger', authenticate as any, adminOnly as any, async (re
     }
 });
 
+v1.get('/admin/config/commissions', authenticate as any, adminOnly as any, async (req, res) => {
+    try {
+        const config = await ConfigClient.getRuleConfig(true);
+        res.json({ success: true, data: config.commission_programs || {} });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+v1.post('/admin/config/commissions', authenticate as any, adminOnly as any, async (req, res) => {
+    try {
+        const currentConfig = await ConfigClient.getRuleConfig();
+        const updatedConfig = {
+            ...currentConfig,
+            commission_programs: {
+                ...(currentConfig.commission_programs || {}),
+                ...(req.body || {})
+            }
+        };
+        await ConfigClient.saveConfig(updatedConfig);
+        res.json({ success: true, message: 'Commission configuration updated successfully.' });
+    } catch (e: any) {
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 v1.get('/admin/config/fx-rates', authenticate as any, adminOnly as any, async (req, res) => {
     try {
         const config = await ConfigClient.getRuleConfig(true);
@@ -2655,7 +3523,7 @@ app.use('/api/v1', globalIpLimiter as any, v1);
 app.use('/', globalIpLimiter as any, v1);
 
 // 5. LEGACY GATEWAY (Backward Compatibility)
-app.post('/api', globalIpLimiter as any, async (req: any, res: any) => {
+if (legacyApiGatewayEnabled) app.post('/api', globalIpLimiter as any, async (req: any, res: any) => {
     const operation = String(req.query.operation || '');
     const payload = req.body || {};
     const token = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.substring(7) : null;
@@ -2757,6 +3625,7 @@ const wss = new WebSocketServer({
 
 wss.on('connection', (ws: WebSocket, req) => {
     (ws as any).isAlive = true;
+    (ws as any).__socketId = crypto.randomUUID();
     ws.on('pong', () => { (ws as any).isAlive = true; });
 
     console.info(`[Nexus] New Node connection from ${req.socket.remoteAddress}`);
@@ -2785,7 +3654,14 @@ wss.on('connection', (ws: WebSocket, req) => {
                 if (userId) {
                     (ws as any).userId = userId;
                     SocketRegistry.register(userId, ws);
-                    ws.send(JSON.stringify({ event: 'AUTH_SUCCESS', ts: Date.now() }));
+                    ws.send(JSON.stringify({
+                        event: 'AUTH_SUCCESS',
+                        ts: Date.now(),
+                        trace: data.trace || undefined,
+                        connectionSerial: data.connectionSerial || undefined,
+                        socket_id: (ws as any).__socketId || undefined,
+                        session_id: userId,
+                    }));
                 }
             }
         } catch (e) {}
@@ -2793,7 +3669,7 @@ wss.on('connection', (ws: WebSocket, req) => {
     
     ws.on('close', () => {
         if ((ws as any).userId) {
-            SocketRegistry.remove((ws as any).userId);
+            SocketRegistry.remove((ws as any).userId, ws);
         }
     });
 });
@@ -2827,14 +3703,16 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 });
 
 // 8. BACKGROUND REAPER & SETTLEMENT ENGINE (V1.0)
-const backgroundInterval = setInterval(async () => {
-    try {
-        await LegacyRecon.reapStuckTransactions();
-        await EntProcessor.settleProcessingTransactions();
-    } catch (e) {
-        console.error('[System] Background Cycle Error:', e);
-    }
-}, 60000); // Run every minute
+const backgroundInterval = gatewayBackgroundJobsEnabled
+    ? setInterval(async () => {
+        try {
+            await LegacyRecon.reapStuckTransactions();
+            await EntProcessor.settleProcessingTransactions();
+        } catch (e) {
+            console.error('[System] Background Cycle Error:', e);
+        }
+    }, 60000)
+    : null; // Run every minute when explicitly enabled for this runtime
 
 // 7. GRACEFUL SHUTDOWN (Scale Ready)
 
@@ -2842,7 +3720,7 @@ const gracefulShutdown = async () => {
     console.info('\n[System] SIGTERM/SIGINT received. Initiating graceful shutdown...');
     
     clearInterval(wsPingInterval);
-    clearInterval(backgroundInterval);
+    if (backgroundInterval) clearInterval(backgroundInterval);
     wss.close(() => {
         console.info('[Nexus] WebSocket server closed.');
     });

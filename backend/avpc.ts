@@ -61,7 +61,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
         endpoint: '/wallet/debit',
         operation: 'WRITE',
         identity: {
-            roles: ['USER', 'SYSTEM', 'SUPER_ADMIN'],
+            roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT', 'SYSTEM', 'SUPER_ADMIN'],
             permissions: ['wallet.debit']
         },
         payload: {
@@ -82,7 +82,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
         endpoint: '/transaction/create',
         operation: 'WRITE',
         identity: {
-            roles: ['USER', 'SYSTEM', 'ADMIN', 'SUPER_ADMIN'],
+            roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT', 'SYSTEM', 'ADMIN', 'SUPER_ADMIN'],
             permissions: ['transaction.create']
         },
         payload: {
@@ -100,7 +100,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
         table: 'transactions',
         operation: 'READ',
         identity: {
-            roles: ['USER'],
+            roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT'],
             permissions: ['transaction.view']
         },
         scope: {

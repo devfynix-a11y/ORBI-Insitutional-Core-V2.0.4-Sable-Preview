@@ -130,6 +130,65 @@ export const StaffCreateSchema = z.object({
     address: z.string().optional()
 });
 
+export const ManagedIdentityCreateSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(8),
+    full_name: z.string().min(1),
+    role: z.enum([
+        'SUPER_ADMIN',
+        'ADMIN',
+        'IT',
+        'AUDIT',
+        'ACCOUNTANT',
+        'CUSTOMER_CARE',
+        'HUMAN_RESOURCE',
+        'CONSUMER',
+        'USER',
+        'MERCHANT',
+        'AGENT',
+    ]),
+    phone: z.string().optional(),
+    nationality: z.string().optional(),
+    address: z.string().optional(),
+    currency: z.string().length(3).optional(),
+    language: z.enum(['en', 'sw']).optional()
+});
+
+export const ServiceCustomerRegistrationSchema = z.object({
+    email: z.string().email().optional(),
+    phone: z.string().min(1).optional(),
+    password: z.string().min(8),
+    full_name: z.string().min(1),
+    nationality: z.string().optional(),
+    address: z.string().optional(),
+    currency: z.string().length(3).optional(),
+    language: z.enum(['en', 'sw']).optional()
+}).refine(data => data.email || data.phone, {
+    message: 'Must provide either email or phone'
+});
+
+export const ServiceAccessRequestCreateSchema = z.object({
+    requested_role: z.enum(['MERCHANT', 'AGENT']),
+    business_name: z.string().min(1).max(120).optional(),
+    note: z.string().min(3).max(1000).optional(),
+    phone: z.string().min(1).optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
+});
+
+export const ServiceAccessRequestReviewSchema = z.object({
+    decision: z.enum(['APPROVED', 'REJECTED']),
+    review_note: z.string().max(1000).optional(),
+});
+
+export const BootstrapAdminSchema = z.object({
+    email: z.string().email(),
+    password: z.string().min(8),
+    full_name: z.string().min(1),
+    phone: z.string().optional(),
+    nationality: z.string().optional(),
+    address: z.string().optional()
+});
+
 export const DeviceRegisterSchema = z.object({
     device_fingerprint: z.string().min(1),
     device_name: z.string().optional(),

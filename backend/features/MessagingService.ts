@@ -153,7 +153,15 @@ CEO, ORBI`
         category: 'security' | 'update' | 'promo' | 'info',
         subject: string, 
         body: string,
-        options: { sms?: boolean, email?: boolean, push?: boolean, whatsapp?: boolean, template?: string, variables?: Record<string, any> } = {}
+        options: {
+            sms?: boolean,
+            email?: boolean,
+            push?: boolean,
+            whatsapp?: boolean,
+            template?: string,
+            eventCode?: string,
+            variables?: Record<string, any>
+        } = {}
     ): Promise<UserMessage | null> {
         const sb = getAdminSupabase();
         
@@ -208,6 +216,8 @@ CEO, ORBI`
                 id,
                 refId,
                 category,
+                template_name: options.template,
+                event_code: options.eventCode,
                 subject: displaySubject, // Send plain text for display
                 body: displayBody,       // Send plain text for display
                 timestamp: msg.created_at
@@ -337,6 +347,223 @@ CEO, ORBI`
 
         console.info(`[Messaging] Node Signal Dispatched to ${userId}: ${subject}`);
         return msg;
+    }
+
+    public async dispatchServiceActivity(
+        userId: string,
+        event:
+            | 'MERCHANT_PAYMENT_PENDING'
+            | 'MERCHANT_PAYMENT_COMPLETED'
+            | 'MERCHANT_PAYMENT_FAILED'
+            | 'MERCHANT_CUSTOMER_PAYMENT_PENDING'
+            | 'MERCHANT_CUSTOMER_PAYMENT_COMPLETED'
+            | 'MERCHANT_CUSTOMER_PAYMENT_FAILED'
+            | 'AGENT_CASH_PENDING'
+            | 'AGENT_CASH_COMPLETED'
+            | 'AGENT_CASH_FAILED'
+            | 'AGENT_CUSTOMER_CASH_PENDING'
+            | 'AGENT_CUSTOMER_CASH_COMPLETED'
+            | 'AGENT_CUSTOMER_CASH_FAILED'
+            | 'AGENT_COMMISSION_PAID'
+            | 'SERVICE_CUSTOMER_REGISTERED'
+            | 'SERVICE_CUSTOMER_ONBOARDED'
+            | 'SERVICE_ACCESS_APPROVED',
+        context: Record<string, any> = {},
+        category: 'update' | 'info' | 'security' = 'update',
+    ) {
+        const profile = await this.getUserProfile(userId);
+        const language = profile.language === 'sw' ? 'sw' : 'en';
+        const currency = context.currency || 'TZS';
+        const numericAmount = context.amount != null ? Number(context.amount) : null;
+        const amount = numericAmount != null ? `${numericAmount.toLocaleString(language === 'sw' ? 'sw-TZ' : 'en-US')} ${currency}` : null;
+        const actorLabel = context.actorLabel || (language === 'sw' ? 'huduma yako ya ORBI' : 'your ORBI service desk');
+        const customerLabel = context.customerName || context.customerId || (language === 'sw' ? 'mteja' : 'customer');
+        const direction = String(context.direction || '').toLowerCase();
+
+        const translations = {
+            en: {
+                MERCHANT_PAYMENT_PENDING: {
+                    subject: 'Merchant payment received',
+                    body: `A merchant payment of ${amount || currency} is being processed in ${actorLabel}.`,
+                },
+                MERCHANT_PAYMENT_COMPLETED: {
+                    subject: 'Merchant payment completed',
+                    body: `A merchant payment of ${amount || currency} has settled successfully in ${actorLabel}.`,
+                },
+                MERCHANT_PAYMENT_FAILED: {
+                    subject: 'Merchant payment update',
+                    body: `A merchant payment in ${actorLabel} did not complete. Review the latest transaction activity for details.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_PENDING: {
+                    subject: 'Merchant payment is processing',
+                    body: `Your payment of ${amount || currency} is being processed through ${actorLabel}.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_COMPLETED: {
+                    subject: 'Merchant payment completed',
+                    body: `Your payment of ${amount || currency} through ${actorLabel} completed successfully.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_FAILED: {
+                    subject: 'Merchant payment update',
+                    body: `Your payment through ${actorLabel} did not complete. Review your latest activity for details.`,
+                },
+                AGENT_CASH_PENDING: {
+                    subject: 'Agent cash request received',
+                    body: `A ${direction || 'cash'} request of ${amount || currency} is being processed in ${actorLabel}.`,
+                },
+                AGENT_CASH_COMPLETED: {
+                    subject: 'Agent cash request completed',
+                    body: `A ${direction || 'cash'} request of ${amount || currency} has completed successfully in ${actorLabel}.`,
+                },
+                AGENT_CASH_FAILED: {
+                    subject: 'Agent cash request update',
+                    body: `A ${direction || 'cash'} request in ${actorLabel} did not complete. Review the latest activity for details.`,
+                },
+                AGENT_CUSTOMER_CASH_PENDING: {
+                    subject: 'Cash service is processing',
+                    body: `Your ${direction || 'cash'} request of ${amount || currency} is being processed through ${actorLabel}.`,
+                },
+                AGENT_CUSTOMER_CASH_COMPLETED: {
+                    subject: 'Cash service completed',
+                    body: `Your ${direction || 'cash'} request of ${amount || currency} through ${actorLabel} completed successfully.`,
+                },
+                AGENT_CUSTOMER_CASH_FAILED: {
+                    subject: 'Cash service update',
+                    body: `Your ${direction || 'cash'} request through ${actorLabel} did not complete. Review your latest activity for details.`,
+                },
+                AGENT_COMMISSION_PAID: {
+                    subject: 'Agent commission paid',
+                    body: `A commission of ${amount || currency} was credited to your ORBI agent account.`,
+                },
+                SERVICE_CUSTOMER_REGISTERED: {
+                    subject: 'Customer added successfully',
+                    body: `${customerLabel} was added through ${actorLabel} and is now linked to your service activity.`,
+                },
+                SERVICE_CUSTOMER_ONBOARDED: {
+                    subject: 'Your ORBI account is ready',
+                    body: `Your ORBI account was created successfully and linked to ${actorLabel}.`,
+                },
+                SERVICE_ACCESS_APPROVED: {
+                    subject: 'Service access approved',
+                    body: `Your ORBI access has been updated. ${actorLabel} is now available on your account.`,
+                },
+            },
+            sw: {
+                MERCHANT_PAYMENT_PENDING: {
+                    subject: 'Malipo ya merchant yamepokelewa',
+                    body: `Malipo ya merchant ya ${amount || currency} yanachakatwa kwenye ${actorLabel}.`,
+                },
+                MERCHANT_PAYMENT_COMPLETED: {
+                    subject: 'Malipo ya merchant yamekamilika',
+                    body: `Malipo ya merchant ya ${amount || currency} yamekamilika kwa mafanikio kwenye ${actorLabel}.`,
+                },
+                MERCHANT_PAYMENT_FAILED: {
+                    subject: 'Taarifa ya malipo ya merchant',
+                    body: `Malipo ya merchant kwenye ${actorLabel} hayajakamilika. Angalia shughuli zako za karibuni kwa maelezo.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_PENDING: {
+                    subject: 'Malipo ya merchant yanachakatwa',
+                    body: `Malipo yako ya ${amount || currency} kupitia ${actorLabel} yanachakatwa.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_COMPLETED: {
+                    subject: 'Malipo ya merchant yamekamilika',
+                    body: `Malipo yako ya ${amount || currency} kupitia ${actorLabel} yamekamilika kwa mafanikio.`,
+                },
+                MERCHANT_CUSTOMER_PAYMENT_FAILED: {
+                    subject: 'Taarifa ya malipo ya merchant',
+                    body: `Malipo yako kupitia ${actorLabel} hayajakamilika. Angalia shughuli zako za karibuni kwa maelezo.`,
+                },
+                AGENT_CASH_PENDING: {
+                    subject: 'Ombi la fedha la agent limepokelewa',
+                    body: `Ombi la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} la ${amount || currency} linachakatwa kwenye ${actorLabel}.`,
+                },
+                AGENT_CASH_COMPLETED: {
+                    subject: 'Ombi la fedha la agent limekamilika',
+                    body: `Ombi la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} la ${amount || currency} limekamilika kwa mafanikio kwenye ${actorLabel}.`,
+                },
+                AGENT_CASH_FAILED: {
+                    subject: 'Taarifa ya fedha ya agent',
+                    body: `Ombi la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} kwenye ${actorLabel} halijakamilika. Angalia shughuli zako za karibuni kwa maelezo.`,
+                },
+                AGENT_CUSTOMER_CASH_PENDING: {
+                    subject: 'Huduma ya fedha inachakatwa',
+                    body: `Ombi lako la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} la ${amount || currency} kupitia ${actorLabel} linachakatwa.`,
+                },
+                AGENT_CUSTOMER_CASH_COMPLETED: {
+                    subject: 'Huduma ya fedha imekamilika',
+                    body: `Ombi lako la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} la ${amount || currency} kupitia ${actorLabel} limekamilika kwa mafanikio.`,
+                },
+                AGENT_CUSTOMER_CASH_FAILED: {
+                    subject: 'Taarifa ya huduma ya fedha',
+                    body: `Ombi lako la ${direction == 'withdrawal' ? 'utoaji' : 'uwekaji'} kupitia ${actorLabel} halijakamilika. Angalia shughuli zako za karibuni kwa maelezo.`,
+                },
+                AGENT_COMMISSION_PAID: {
+                    subject: 'Kamisheni ya agent imelipwa',
+                    body: `Kamisheni ya ${amount || currency} imeingizwa kwenye akaunti yako ya agent ya ORBI.`,
+                },
+                SERVICE_CUSTOMER_REGISTERED: {
+                    subject: 'Mteja ameongezwa kwa mafanikio',
+                    body: `${customerLabel} ameongezwa kupitia ${actorLabel} na sasa ameunganishwa na huduma zako.`,
+                },
+                SERVICE_CUSTOMER_ONBOARDED: {
+                    subject: 'Akaunti yako ya ORBI iko tayari',
+                    body: `Akaunti yako ya ORBI imefunguliwa kwa mafanikio na imeunganishwa na ${actorLabel}.`,
+                },
+                SERVICE_ACCESS_APPROVED: {
+                    subject: 'Huduma imeidhinishwa',
+                    body: `Ufikiaji wako wa ORBI umesasishwa. ${actorLabel} sasa inapatikana kwenye akaunti yako.`,
+                },
+            },
+        } as const;
+
+        const copy = translations[language][event] || translations.en[event];
+        const templateMap = {
+            MERCHANT_PAYMENT_PENDING: 'Merchant_Service_Update',
+            MERCHANT_PAYMENT_COMPLETED: 'Merchant_Service_Update',
+            MERCHANT_PAYMENT_FAILED: 'Merchant_Service_Update',
+            MERCHANT_CUSTOMER_PAYMENT_PENDING: 'Merchant_Customer_Payment_Update',
+            MERCHANT_CUSTOMER_PAYMENT_COMPLETED: 'Merchant_Customer_Payment_Update',
+            MERCHANT_CUSTOMER_PAYMENT_FAILED: 'Merchant_Customer_Payment_Update',
+            AGENT_CASH_PENDING: 'Agent_Cash_Update',
+            AGENT_CASH_COMPLETED: 'Agent_Cash_Update',
+            AGENT_CASH_FAILED: 'Agent_Cash_Update',
+            AGENT_CUSTOMER_CASH_PENDING: 'Agent_Customer_Cash_Update',
+            AGENT_CUSTOMER_CASH_COMPLETED: 'Agent_Customer_Cash_Update',
+            AGENT_CUSTOMER_CASH_FAILED: 'Agent_Customer_Cash_Update',
+            AGENT_COMMISSION_PAID: 'Agent_Commission_Paid',
+            SERVICE_CUSTOMER_REGISTERED: 'Service_Customer_Registered',
+            SERVICE_CUSTOMER_ONBOARDED: 'Service_Customer_Registered',
+            SERVICE_ACCESS_APPROVED: 'Service_Access_Approved',
+        } as const;
+
+        const templateVariables: Record<string, any> = {
+            refId: context.refId,
+            actorLabel,
+            amount: numericAmount ?? context.amount ?? 0,
+            currency,
+            status: String(context.status || '').toUpperCase() || (
+                event.includes('FAILED')
+                    ? 'FAILED'
+                    : event.includes('PENDING')
+                      ? 'PENDING'
+                      : 'COMPLETED'
+            ),
+            direction: direction || 'deposit',
+            customerName: customerLabel,
+        };
+
+        // Intentionally delegate channel choice to dispatch().
+        // This keeps service-actor notifications aligned with the global
+        // ORBI policy:
+        // - language from the user's stored profile
+        // - Tanzania/users with +255 or NIDA preference -> SMS first
+        // - otherwise email when available
+        // - otherwise WhatsApp for phone-only non-Tanzania users
+        // - realtime socket push and gateway push continue to follow the same node
+        return this.dispatch(userId, category, copy.subject, copy.body, {
+            template: templateMap[event],
+            eventCode: event,
+            variables: templateVariables,
+        });
     }
 
     /**

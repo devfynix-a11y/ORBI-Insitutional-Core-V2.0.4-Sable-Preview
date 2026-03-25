@@ -2,7 +2,7 @@ import { WebSocket } from 'ws';
 import { getAdminSupabase } from '../../services/supabaseClient.js';
 
 class SocketRegistryService {
-    private clients: Map<string, WebSocket> = new Map();
+    private clients: Map<string, Set<WebSocket>> = new Map();
     private isListening = false;
 
     constructor() {
@@ -31,15 +31,26 @@ class SocketRegistryService {
     }
 
     public register(userId: string, ws: WebSocket) {
-        this.clients.set(userId, ws);
-        console.info(`[SocketRegistry] Registered client for user: ${userId}`);
+        const existing = this.clients.get(userId) || new Set<WebSocket>();
+        existing.add(ws);
+        this.clients.set(userId, existing);
+        console.info(`[SocketRegistry] Registered client for user: ${userId} (connections=${existing.size})`);
     }
 
-    public remove(userId: string) {
-        if (this.clients.has(userId)) {
-            this.clients.delete(userId);
-            console.info(`[SocketRegistry] Removed client for user: ${userId}`);
+    public remove(userId: string, ws?: WebSocket) {
+        const existing = this.clients.get(userId);
+        if (!existing) return;
+
+        if (ws) {
+            existing.delete(ws);
+            if (existing.size > 0) {
+                console.info(`[SocketRegistry] Removed one client for user: ${userId} (connections=${existing.size})`);
+                return;
+            }
         }
+
+        this.clients.delete(userId);
+        console.info(`[SocketRegistry] Removed client registry for user: ${userId}`);
     }
 
     /**
@@ -70,23 +81,45 @@ class SocketRegistryService {
     }
 
     private sendLocal(userId: string, payload: any): boolean {
-        const client = this.clients.get(userId);
-        if (client && client.readyState === WebSocket.OPEN) {
+        const clients = this.clients.get(userId);
+        if (!clients || clients.size == 0) {
+            return false;
+        }
+
+        let delivered = false;
+        for (const client of [...clients]) {
+            if (client.readyState !== WebSocket.OPEN) {
+                clients.delete(client);
+                continue;
+            }
+
             try {
                 client.send(JSON.stringify(payload));
-                return true;
+                delivered = true;
             } catch (e) {
                 console.error(`[SocketRegistry] Failed to send locally to ${userId}`, e);
-                this.remove(userId);
+                clients.delete(client);
             }
         }
-        return false;
+
+        if (clients.size === 0) {
+            this.clients.delete(userId);
+        }
+
+        return delivered;
     }
 
     public broadcast(payload: any) {
-        this.clients.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(payload));
+        this.clients.forEach((clients, userId) => {
+            for (const client of [...clients]) {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(JSON.stringify(payload));
+                } else {
+                    clients.delete(client);
+                }
+            }
+            if (clients.size === 0) {
+                this.clients.delete(userId);
             }
         });
     }

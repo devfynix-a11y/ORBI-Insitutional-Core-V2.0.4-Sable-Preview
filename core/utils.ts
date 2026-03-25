@@ -103,6 +103,20 @@ export const RBAC = {
                 'auth.login', 'auth.logout', 'auth.refresh', 'auth.pwd_reset',
                 'user.read', 'transaction.view'
             ],
+            'MERCHANT': [
+                'auth.login', 'auth.logout', 'auth.refresh',
+                'user.read', 'user.update',
+                'wallet.read',
+                'transaction.create', 'transaction.view',
+                'merchant.read', 'merchant.create', 'merchant.update', 'merchant.settlement'
+            ],
+            'AGENT': [
+                'auth.login', 'auth.logout', 'auth.refresh',
+                'user.read', 'user.update',
+                'wallet.read',
+                'transaction.create', 'transaction.view',
+                'agent.cash.deposit', 'agent.cash.withdraw', 'agent.float.manage'
+            ],
             'USER': [
                 'auth.login', 'auth.logout', 'auth.refresh',
                 'user.read', 'user.update',

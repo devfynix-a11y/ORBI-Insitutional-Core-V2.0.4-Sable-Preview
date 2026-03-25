@@ -1,5 +1,7 @@
 import { getAdminSupabase } from '../supabaseClient.js';
 import { FinancialPartner } from '../../types.js';
+import { secureProviderRegistryPayload } from '../payments/providers/RegistryPayloadSecurity.js';
+import { normalizeFinancialPartnerInput } from '../payments/providers/ProviderRegistryValidator.js';
 
 export class PartnerRegistry {
     private static sb = getAdminSupabase();
@@ -9,11 +11,20 @@ export class PartnerRegistry {
     }
 
     public static async addPartner(partner: Omit<FinancialPartner, 'id' | 'created_at'>) {
-        return await this.sb!.from('financial_partners').insert(partner);
+        const normalized = normalizeFinancialPartnerInput({
+            ...partner,
+            logic_type: partner.logic_type || 'REGISTRY',
+        });
+        const secured = await secureProviderRegistryPayload({
+            ...normalized,
+        });
+        return await this.sb!.from('financial_partners').insert(secured);
     }
 
     public static async updatePartner(id: string, updates: Partial<FinancialPartner>) {
-        return await this.sb!.from('financial_partners').update(updates).eq('id', id);
+        const normalized = normalizeFinancialPartnerInput(updates, 'update');
+        const secured = await secureProviderRegistryPayload(normalized);
+        return await this.sb!.from('financial_partners').update(secured).eq('id', id);
     }
 
     public static async deletePartner(id: string) {

@@ -3,6 +3,8 @@ import { FinancialPartner, DigitalMerchant } from '../../../types.js';
 import { getSupabase } from '../../../services/supabaseClient.js';
 import { DataVault } from '../../security/encryption.js';
 import { UUID } from '../../../services/utils.js';
+import { secureProviderRegistryPayload } from './RegistryPayloadSecurity.js';
+import { normalizeFinancialPartnerInput } from './ProviderRegistryValidator.js';
 
 /**
  * ORBI MERCHANT FABRIC (V2.1)
@@ -16,31 +18,34 @@ class MerchantFabricService {
         const sb = getSupabase();
         if (!sb) throw new Error("VAULT_OFFLINE");
 
-        // PROTOCOL: Immediate Cryptographic Hardening
-        // Data is encrypted at the application edge before hitting the DB driver.
-        const encryptedSecret = payload.client_secret 
-            ? await DataVault.encrypt(payload.client_secret, { domain: 'PARTNER_SECRET', node: payload.name }) 
-            : '';
-        
+        const normalized = normalizeFinancialPartnerInput({
+            ...payload,
+            logic_type: payload.logic_type || 'REGISTRY',
+        });
+
         const partner: FinancialPartner = {
             id: UUID.generate(),
-            name: payload.name || 'Unknown Node',
-            type: payload.type || 'mobile_money',
+            name: normalized.name || 'Unknown Node',
+            type: normalized.type || 'mobile_money',
             icon: payload.icon || 'university',
             color: payload.color || '#4361EE',
             client_id: payload.client_id,
-            client_secret: encryptedSecret, // Persistent ciphertext only
-            api_base_url: payload.api_base_url,
+            client_secret: payload.client_secret,
+            api_base_url: normalized.api_base_url,
             status: 'ACTIVE',
             created_at: new Date().toISOString(),
-            logic_type: payload.logic_type || 'SPECIALIZED',
-            mapping_config: payload.mapping_config
+            logic_type: normalized.logic_type || 'REGISTRY',
+            mapping_config: normalized.mapping_config,
+            provider_metadata: payload.provider_metadata,
+            connection_secret: payload.connection_secret,
+            webhook_secret: payload.webhook_secret,
         };
 
-        const { error } = await sb.from('financial_partners').insert(partner);
+        const securedPartner = await secureProviderRegistryPayload(partner);
+        const { error } = await sb.from('financial_partners').insert(securedPartner);
         if (error) throw error;
         
-        return partner;
+        return securedPartner;
     }
 
     /**
@@ -63,6 +68,7 @@ class MerchantFabricService {
                 status, 
                 logic_type, 
                 created_at,
+                provider_metadata,
                 mapping_config
             `)
             .eq('status', 'ACTIVE');

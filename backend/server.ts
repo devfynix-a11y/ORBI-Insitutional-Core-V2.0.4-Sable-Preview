@@ -48,6 +48,11 @@ import { SettlementEngine } from './core/SettlementEngine.js';
 import { EntProcessor } from './enterprise/wealth/EnterprisePaymentProcessor.js';
 import { Treasury } from './enterprise/treasuryService.js';
 import { RiskComplianceEngine } from './security/RiskComplianceEngine.js';
+import { PartnerRegistry } from './admin/partnerRegistry.js';
+import { ServiceActorOps } from './features/ServiceActorOps.js';
+
+const internalBackgroundJobsEnabled =
+    process.env.ORBI_ENABLE_INTERNAL_BACKGROUND_JOBS === 'true';
 
 class OrbiServer {
 // ...
@@ -95,16 +100,19 @@ class OrbiServer {
         // Start External Broker Listener (Worker Mode)
         // Note: InternalBroker now handles its own internal polling and heartbeat.
 
-        // Start Background Jobs (Settlement & Reaping)
-        setInterval(async () => {
-            try {
-                await ReconEngine.reapStuckTransactions();
-                await EntProcessor.settleProcessingTransactions();
-                await Treasury.sweepAllOrganizations();
-            } catch (e) {
-                console.error("[BackgroundJob] Cycle failed:", e);
-            }
-        }, CONFIG.BACKGROUND_JOB_INTERVAL); // Run every configured interval
+        // Start Background Jobs only when this process is explicitly promoted to
+        // a worker role. The gateway runtime already runs its own scheduler.
+        if (internalBackgroundJobsEnabled) {
+            setInterval(async () => {
+                try {
+                    await ReconEngine.reapStuckTransactions();
+                    await EntProcessor.settleProcessingTransactions();
+                    await Treasury.sweepAllOrganizations();
+                } catch (e) {
+                    console.error("[BackgroundJob] Cycle failed:", e);
+                }
+            }, CONFIG.BACKGROUND_JOB_INTERVAL); // Run every configured interval
+        }
     }
 
     async warmup() {
@@ -132,7 +140,7 @@ class OrbiServer {
     }
     async getSession(token?: string) { return this.auth.getSession(token); }
     async refreshSession(refreshToken: string, metadata?: any) { return this.auth.refreshSession(refreshToken, metadata); }
-    async logout() { return this.auth.logout(); }
+    async logout(token?: string, refreshToken?: string) { return this.auth.logout(token, refreshToken); }
     async lookupUser(query: string) { return Identity.lookupUser(query); }
     
     async updatePassword(password: string) { return this.auth.updatePassword(password); }
@@ -324,6 +332,10 @@ class OrbiServer {
             metadata: payload.metadata
         } as any);
 
+        if (result?.success && result.transaction) {
+            await ServiceActorOps.handleTransactionPosted(sessionUser, payload, result.transaction);
+        }
+
         return result;
     }
 
@@ -403,6 +415,16 @@ class OrbiServer {
         const { data } = await sb.from('users').select('*');
         return data || [];
     }
+    async getBootstrapState() {
+        const sb = getAdminSupabase() || getSupabase();
+        if (!sb) return { staffCount: 0, bootstrapRequired: true };
+        const { count } = await sb.from('staff').select('id', { count: 'exact', head: true });
+        const staffCount = count || 0;
+        return {
+            staffCount,
+            bootstrapRequired: staffCount === 0
+        };
+    }
     async createStaff(payload: any, actorId: string) {
         const sb = getAdminSupabase() || getSupabase();
         if (!sb) return { error: 'DB_OFFLINE' };
@@ -444,6 +466,48 @@ class OrbiServer {
 
         await this.security.logActivity(actorId, 'STAFF_CREATION', 'success', `Created staff member ${payload.email} with role ${payload.role}`);
         return { success: true, data: { id: authData.user.id } };
+    }
+    async createManagedIdentity(payload: any, actorId: string) {
+        const publicRoleRegistryMap: Record<string, 'CONSUMER' | 'MERCHANT' | 'AGENT'> = {
+            CONSUMER: 'CONSUMER',
+            USER: 'CONSUMER',
+            MERCHANT: 'MERCHANT',
+            AGENT: 'AGENT',
+        };
+        const targetRegistryType = publicRoleRegistryMap[String(payload.role || '').toUpperCase()];
+        if (targetRegistryType) {
+            const result = await this.auth.signUp(payload.email || '', payload.password, {
+                full_name: payload.full_name,
+                phone: payload.phone,
+                nationality: payload.nationality,
+                address: payload.address,
+                currency: payload.currency || 'USD',
+                language: payload.language || 'en',
+                role: payload.role,
+                registry_type: targetRegistryType,
+                app_origin: 'ORBI_INSTITUTIONAL_CORE_V2026',
+                created_via_admin_portal: true
+            });
+            if (result?.error) return { error: result.error.message || result.error };
+            await this.security.logActivity(
+                actorId,
+                'IDENTITY_CREATION',
+                'success',
+                `Created managed ${targetRegistryType.toLowerCase()} ${payload.email} with role ${payload.role}`,
+            );
+            return { success: true, data: result.data };
+        }
+        return this.createStaff(payload, actorId);
+    }
+    async bootstrapAdmin(payload: any) {
+        const state = await this.getBootstrapState();
+        if (!state.bootstrapRequired) {
+            return { error: 'BOOTSTRAP_ALREADY_COMPLETED' };
+        }
+        return this.createStaff({
+            ...payload,
+            role: 'SUPER_ADMIN'
+        }, 'bootstrap-admin');
     }
 
     async adminUpdateUserProfile(targetUserId: string, updates: any, actorId: string) {
@@ -510,6 +574,65 @@ class OrbiServer {
     async getUserMerchantAccounts(userId: string) { return MerchantAccounts.getUserMerchants(userId); }
     async getMerchantAccountById(merchantId: string) { return MerchantAccounts.getMerchantById(merchantId); }
     async updateMerchantSettlement(merchantId: string, data: any) { return MerchantAccounts.updateSettlementInfo(merchantId, data); }
+    async getMerchantTransactions(userId: string, limit: number = 50, offset: number = 0) {
+        const transactions = await ServiceActorOps.getMerchantTransactions(userId, limit, offset);
+        if (transactions.length > 0) {
+            return transactions;
+        }
+        const fallback = await this.ledger.getLatestTransactions(userId, limit, offset);
+        return fallback.filter((tx: any) => {
+            const metadata = tx?.metadata || {};
+            return metadata.service_context === 'MERCHANT' || metadata.merchant_id;
+        });
+    }
+    async getAgentTransactions(userId: string, limit: number = 50, offset: number = 0) {
+        const transactions = await ServiceActorOps.getAgentTransactions(userId, limit, offset);
+        if (transactions.length > 0) {
+            return transactions;
+        }
+        const fallback = await this.ledger.getLatestTransactions(userId, limit, offset);
+        return fallback.filter((tx: any) => {
+            const metadata = tx?.metadata || {};
+            return metadata.service_context === 'AGENT_CASH';
+        });
+    }
+    async getMerchantWallets(userId: string) { return ServiceActorOps.getMerchantWallets(userId); }
+    async getAgentWallets(userId: string) { return ServiceActorOps.getAgentWallets(userId); }
+    async registerCustomerByServiceActor(actor: any, actorRole: 'MERCHANT' | 'AGENT', payload: any) {
+        return ServiceActorOps.registerCustomerByActor(actor, actorRole, payload, this.auth);
+    }
+    async getServiceLinkedCustomers(actorUserId?: string, actorRole?: string) {
+        return ServiceActorOps.getLinkedCustomers(actorUserId, actorRole);
+    }
+    async getServiceCommissions(actorUserId?: string, actorRole?: string) {
+        return ServiceActorOps.getServiceCommissions(actorUserId, actorRole);
+    }
+    async processMerchantPayment(payload: any, user: any) {
+        return this.processSecurePayment({
+            ...payload,
+            type: payload.type || 'EXTERNAL_PAYMENT',
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'MERCHANT',
+                merchant_actor_id: user?.id,
+                merchant_role: user?.role || user?.user_metadata?.role || 'MERCHANT',
+            },
+        }, user);
+    }
+    async processAgentCashOperation(payload: any, user: any, direction: 'deposit' | 'withdrawal') {
+        const normalizedType = direction === 'deposit' ? 'DEPOSIT' : 'WITHDRAWAL';
+        return this.processSecurePayment({
+            ...payload,
+            type: normalizedType,
+            metadata: {
+                ...(payload.metadata || {}),
+                service_context: 'AGENT_CASH',
+                cash_direction: direction,
+                agent_actor_id: user?.id,
+                agent_role: user?.role || user?.user_metadata?.role || 'AGENT',
+            },
+        }, user);
+    }
 
     // --- FINANCIAL CORE ENGINE (MULTI-TENANT) ---
     async createTenant(userId: string, data: any) { return FinancialCore.createTenant(userId, data); }
@@ -528,16 +651,18 @@ class OrbiServer {
 
     async registerMerchant(payload: any) { return RegulatoryService.registerMerchant(payload); }
 
-    async getPartners() { return RegulatoryService.getPartners(); }
+    async getPartners() { return PartnerRegistry.listPartners(); }
     async registerPartner(payload: any, actorId: string) {
-        return RegulatoryService.registerPartner(
-            payload.name,
-            payload.type,
-            payload.icon,
-            payload.color,
-            payload.connection_secret || payload.client_secret || payload.connection || '',
-            payload.provider_metadata || payload.metadata
-        );
+        return PartnerRegistry.addPartner({
+            ...payload,
+            provider_metadata: payload.provider_metadata || payload.metadata || {},
+            connection_secret:
+                payload.connection_secret ||
+                payload.client_secret ||
+                payload.connection ||
+                '',
+            logic_type: payload.logic_type || 'REGISTRY',
+        });
     }
 
     // --- DATA & MESSAGING ---

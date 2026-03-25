@@ -2,7 +2,7 @@
 
 **Classification**: INSTITUTIONAL / INTERNAL USE ONLY  
 **Version**: 31.0.0 (Titanium Hardened)  
-**Last Updated**: 2026-03-22
+**Last Updated**: 2026-03-24
 
 ---
 
@@ -14,6 +14,20 @@ This manual provides the definitive technical specification for integrating:
 1.  **Official Mobile Applications** (iOS / Android)
 2.  **Institutional Desktop Clients** (Teller / Admin)
 3.  **Third-Party Financial Bridges** (M-Pesa, Banks, Crypto)
+
+### 1.1 Identity Classes
+
+The runtime now distinguishes these identity classes:
+
+- **Institutional / staff roles**: `SUPER_ADMIN`, `ADMIN`, `IT`, `AUDIT`, `ACCOUNTANT`, `CUSTOMER_CARE`, `HUMAN_RESOURCE`
+- **Dynamic public roles**: `USER`, `MERCHANT`, `AGENT`
+- **Public registry classifications**: `CONSUMER`, `MERCHANT`, `AGENT`
+
+Role intent:
+- `USER`: default public signup role and compatibility fallback
+- `CONSUMER`: normal retail registry classification for public users
+- `MERCHANT`: merchant / business payment actor
+- `AGENT`: cash deposit / withdrawal field operator
 
 ---
 
@@ -37,8 +51,10 @@ The **Cyber Sentinel WAF** will summarily reject any request missing these heade
 | Header | Required? | Format | Description |
 | :--- | :--- | :--- | :--- |
 | `Authorization` | YES | `Bearer <JWT>` | The session token acquired via Login. |
-| `x-orbi-app-id` | YES | `mobile-ios` \| `mobile-android` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the client cluster. |
-| `x-orbi-app-origin` | YES | `ORBI_MOBILE_V2026` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the application origin. |
+| `x-orbi-app-id` | YES | `mobile-ios` \| `mobile-android` \| `ORBI_INSTITUTIONAL_CORE_V2026` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the client cluster. |
+| `x-orbi-app-origin` | YES | `ORBI_MOBILE_V2026` \| `ORBI_INSTITUTIONAL_CORE_V2026` \| `OBI_INSTITUTIONAL_CORE_V25` \| `DPS_INSTITUTIONAL_CORE_V25` | Identifies the application origin. |
+| `x-orbi-user-role` | CONDITIONAL | `USER` \| `CONSUMER` \| `MERCHANT` \| `AGENT` \| staff roles | Required on authenticated institutional requests. Must match the authenticated session role when present. |
+| `x-orbi-registry-type` | CONDITIONAL | `CONSUMER` \| `MERCHANT` \| `AGENT` \| `STAFF` | Accepted on authenticated requests and must match the authoritative backend registry classification when present. Mobile clients should prefer this header over frontend role inference. |
 | `x-orbi-apk-hash` | CONDITIONAL | `SHA-256 Hash` | **REQUIRED** for Android native apps. |
 | `x-orbi-trace` | YES | `UUID-v4` | Unique request ID for distributed tracing. |
 | `x-idempotency-key` | CONDITIONAL | `UUID-v4` | **REQUIRED** for all `POST /transactions` operations. |
@@ -114,6 +130,10 @@ The IAM system enforces **Zero-Trust Identity Quarantine (DIQ)**. New nodes star
 | `PATCH` | `/v1/admin/users/{id}/status` | Admin/HR | Update user account status (active/blocked/frozen). |
 | `PATCH` | `/v1/admin/users/{id}/profile` | Admin/HR | Update user profile details (KYC, Name, etc). |
 | `POST` | `/v1/messaging/email` | Admin | Send system email notifications via ORBI Gateway. |
+| `GET` | `/v1/service-access/requests/my` | Protected | List the current public user's merchant/agent access requests. |
+| `POST` | `/v1/service-access/requests` | Protected | Create a merchant or agent access request for ORBI review. |
+| `GET` | `/v1/admin/service-access/requests` | Admin/Customer Care/HR | Review queue for pending merchant/agent access requests. |
+| `POST` | `/v1/admin/service-access/requests/{id}/review` | Admin/Customer Care/HR | Approve or reject a merchant/agent access request. |
 
 ### 3.2 Biometric Authentication (Passkeys)
 
@@ -143,15 +163,41 @@ The system automatically generates a unique, high-entropy Customer ID for every 
 **Origin-Based Role Assignment**:
 The system enforces strict role assignment based on the `app_origin` field in the metadata.
 
-*   `OBI_MOBILE_V1` (Mobile App):
-    *   **Role**: Forced to `CONSUMER`.
+*   `ORBI_MOBILE_V2026` (Mobile App, current):
+    *   **Role**: Forced to `USER`.
     *   **Registry**: Forced to `CONSUMER`.
-    *   **Use Case**: Public user registration.
+    *   **Use Case**: Public user registration. Merchant and agent access must be requested after signup.
+    *   **Compatibility**: `OBI_MOBILE_V1` remains accepted for legacy clients only.
 
-*   `OBI_INSTITUTIONAL_CORE_V25` / `DPS_INSTITUTIONAL_CORE_V25` (Internal):
-    *   **Role**: Respected from input (e.g., `ADMIN`, `STAFF`).
-    *   **Registry**: Forced to `STAFF`.
-    *   **Use Case**: Admin/Staff creation.
+*   `ORBI_INSTITUTIONAL_CORE_V2026` / `OBI_INSTITUTIONAL_CORE_V25` / `DPS_INSTITUTIONAL_CORE_V25` (Internal):
+    *   **Role**: Respected from input.
+    *   **Registry Resolution**:
+        * `SUPER_ADMIN`, `ADMIN`, `IT`, `AUDIT`, `ACCOUNTANT`, `CUSTOMER_CARE`, `HUMAN_RESOURCE` -> `STAFF`
+        * `MERCHANT` -> `MERCHANT`
+        * `AGENT` -> `AGENT`
+        * `CONSUMER` / `USER` -> `CONSUMER`
+    *   **Use Case**: Staff creation, managed public identity creation, merchant onboarding, agent onboarding.
+
+### 3.3.1 Service Access Upgrade Workflow
+
+Mobile and public users do not self-assign `MERCHANT` or `AGENT` at signup.
+The authoritative upgrade path is:
+
+1.  User signs up through the public mobile app.
+2.  Backend creates the identity as:
+    * `role = USER`
+    * `registry_type = CONSUMER`
+3.  User submits one of:
+    * merchant access request
+    * agent access request
+4.  Institutional staff review the request in the ORBI control portal or via admin APIs.
+5.  On approval:
+    * `role` is promoted to `MERCHANT` or `AGENT`
+    * `registry_type` is promoted to `MERCHANT` or `AGENT`
+    * agent approvals provision the `agents` operational record
+6.  Mobile clients refresh profile/session state and expose the relevant merchant or agent UI.
+
+This model prevents direct self-promotion while preserving a single public signup flow.
 
 **Payload**:
 ```json
@@ -161,7 +207,7 @@ The system enforces strict role assignment based on the `app_origin` field in th
   "full_name": "Juma Jux",
   "phone": "+255712345678",
   "metadata": {
-    "app_origin": "OBI_MOBILE_V1", // CRITICAL: Determines Role
+    "app_origin": "ORBI_MOBILE_V2026", // CRITICAL: Determines Role
     "nationality": "Tanzania"
   }
 }
@@ -312,6 +358,36 @@ The Orbi platform supports granular user preferences for language and notificati
 }
 ```
 
+### 3.8.1 Settlement Notification Matrix
+
+Participant messaging is tied to authoritative transaction settlement. When a
+transaction reaches `completed` or `settled`, ORBI dispatches user-facing
+messages directly through the normal messaging node and the realtime
+`/nexus-stream` websocket path using each participant's preferred language.
+
+| Flow | Settlement Trigger | Side A | Side B | Templates |
+| :--- | :--- | :--- | :--- | :--- |
+| Consumer transfer | `completed` / `settled` | Sender | Recipient | `Transfer_Sent`, `Transfer_Received` |
+| Escrow transfer release | `completed` / `settled` | Sender / payer | Recipient / beneficiary | `Transfer_Sent`, `Transfer_Received` or escrow-specific copy where applicable |
+| Merchant-serviced payment | `completed` / `settled` | Merchant operator | Customer / payer | `Merchant_Service_Update`, `Merchant_Customer_Payment_Update` |
+| Agent cash deposit / top-up | `completed` / `settled` | Agent operator | Customer receiving top-up | `Agent_Cash_Update`, `Agent_Customer_Cash_Update` |
+| Agent cash withdrawal | `completed` / `settled` | Agent operator | Customer withdrawing cash | `Agent_Cash_Update`, `Agent_Customer_Cash_Update` |
+| Agent referral / service commission payout | commission payout transaction `completed` | Agent | n/a | `Agent_Commission_Paid` |
+| Service customer registration | registration finalization | Merchant or agent | Registered public user | `Service_Customer_Registered` on both sides with localized copy |
+| Service access approval | request review `APPROVED` | Approved public user | n/a | `Service_Access_Approved` |
+
+Rules:
+- messages are dispatched after settlement confirmation, not just at preview time
+- actor-side and customer-side service messages are separate templates
+- SMS, push, and email template variants exist in both English (`en`) and Swahili (`sw`)
+- websocket push is sent directly from the backend messaging node using the same localized subject/body that is persisted for notifications
+- service-actor templates do not bypass ORBI's normal channel prioritization:
+  - language is resolved from the user's stored profile
+  - Tanzania / `+255` / `NIDA` users prefer SMS
+  - non-Tanzania users prefer email when available
+  - phone-only non-Tanzania users fall back to WhatsApp
+  - gateway push and websocket realtime continue to use the same localized content
+
 ### 3.9 Admin/HR Operations
 **Create Staff (Admin Only)**
 ```json
@@ -443,6 +519,23 @@ The **Atomic Ledger** is the heart of ORBI. It ensures double-entry consistency 
 | `GET` | `/v1/merchants/accounts/my` | Protected | **NEW**: List Merchant Accounts owned by user. |
 | `GET` | `/v1/merchants/accounts/:id` | Protected | **NEW**: Get Merchant Account details. |
 | `PATCH` | `/v1/merchants/accounts/:id/settlement` | Protected | **NEW**: Update Merchant Settlement info. |
+| `GET` | `/v1/merchant/transactions` | Merchant/Admin/Audit | List merchant-context transactions for the authenticated merchant actor. |
+| `GET` | `/v1/merchant/wallets` | Merchant/Admin/Audit | List merchant operational wallet projections. |
+| `POST` | `/v1/merchant/customers/register` | Merchant/Admin | Register a new consumer from a merchant service node. |
+| `GET` | `/v1/merchant/customers` | Merchant/Admin/Audit | List merchant-sponsored customers. |
+| `POST` | `/v1/merchant/payments/preview` | Merchant/Admin | Preview a merchant-context payment flow. |
+| `POST` | `/v1/merchant/payments/settle` | Merchant/Admin | Execute a merchant-context payment flow. |
+| `GET` | `/v1/agent/transactions` | Agent/Admin/Audit | List agent cash-service transactions for the authenticated agent actor. |
+| `GET` | `/v1/agent/wallets` | Agent/Admin/Audit | List agent operational wallet projections. |
+| `POST` | `/v1/agent/customers/register` | Agent/Admin | Register a new consumer from an agent service node and create a sponsorship link. |
+| `GET` | `/v1/agent/customers` | Agent/Admin/Audit | List agent-sponsored customers. |
+| `GET` | `/v1/agent/commissions` | Agent/Admin/Audit/Accountant | List agent commission records. |
+| `POST` | `/v1/agent/cash/deposit/preview` | Agent/Admin | Preview an agent cash-in operation. |
+| `POST` | `/v1/agent/cash/deposit/settle` | Agent/Admin | Execute an agent cash-in operation. |
+| `POST` | `/v1/agent/cash/withdraw/preview` | Agent/Admin | Preview an agent cash-out operation. |
+| `POST` | `/v1/agent/cash/withdraw/settle` | Agent/Admin | Execute an agent cash-out operation. |
+| `GET` | `/v1/admin/service-links` | Admin | Inspect merchant/agent-sponsored customer links. |
+| `GET` | `/v1/admin/service-commissions` | Admin | Inspect merchant/agent commission records. |
 | `GET` | `/v1/notifications` | Protected | Fetch paginated user notifications. |
 | `PATCH` | `/v1/notifications/:id/read` | Protected | Mark a specific notification as read. |
 | `PATCH` | `/v1/notifications/read-all` | Protected | Mark all notifications as read. |
@@ -610,6 +703,418 @@ The ORBI transaction lifecycle is designed for maximum transparency and security
     - **Auto-Reversal**: Transactions stuck in `processing` for > 5 minutes are automatically reversed (refunded to sender) and marked as `failed`.
     - **Manual Review**: Transactions flagged for review expire after 24 hours if not approved.
 
+### 4.6 Merchant and Agent Service Flows
+
+The public service layer now exposes role-aware flows beyond generic retail transfers.
+
+#### Shared Banking Guarantees
+
+Merchant, agent, and normal consumer payments all still use the same core financial engine:
+- the same authentication and permission enforcement
+- the same preview then settle payment lifecycle
+- the same canonical `transactions` table
+- the same immutable `financial_ledger`
+- the same reconciliation, audit, and fraud/security controls
+
+The difference is not ledger integrity. The difference is operational treatment, reporting, attribution, and post-processing.
+
+#### How These Flows Differ From Normal Consumer Transfers
+
+Normal consumer transfer:
+- Represents retail user-to-user or retail wallet activity
+- Is recorded only in the canonical payment tables unless other product domains need projection
+- Has no service-actor sponsorship or commission logic
+
+Merchant payment:
+- Represents business payment acceptance and merchant operating activity
+- Is tagged with merchant service metadata
+- Is projected into merchant operational tables for merchant reporting, settlement, and support workflows
+- Keeps merchant business activity separate from normal personal retail history
+
+Agent cash transaction:
+- Represents cash-in / cash-out service activity performed by a field operator
+- Is tagged with agent service metadata plus cash direction
+- Is projected into agent operational tables for float operations, cash-service audit, and commission handling
+- Can generate direct agent commission based on admin policy
+
+#### Merchant
+- Intended role: `MERCHANT`
+- Primary routes:
+  - `GET /v1/merchant/wallets`
+  - `POST /v1/merchant/customers/register`
+  - `GET /v1/merchant/customers`
+  - `POST /v1/merchant/payments/preview`
+  - `POST /v1/merchant/payments/settle`
+  - `GET /v1/merchant/transactions`
+- Transaction tagging:
+  - `metadata.service_context = "MERCHANT"`
+- Storage model:
+  - Canonical money movement remains in `transactions` and `financial_ledger`
+  - Merchant-specific operational projection is written to `merchant_transactions`
+  - Merchant operational wallet projection is written to `merchant_wallets`
+- Business interpretation:
+  - Treated as merchant/business activity rather than normal consumer P2P
+  - Can be reported, supported, and reviewed separately from retail user transfers
+  - Keeps business operations isolated without creating a second money engine
+
+#### Agent
+- Intended role: `AGENT`
+- Primary routes:
+  - `GET /v1/agent/wallets`
+  - `POST /v1/agent/customers/register`
+  - `GET /v1/agent/customers`
+  - `GET /v1/agent/commissions`
+  - `POST /v1/agent/cash/deposit/preview`
+  - `POST /v1/agent/cash/deposit/settle`
+  - `POST /v1/agent/cash/withdraw/preview`
+  - `POST /v1/agent/cash/withdraw/settle`
+  - `GET /v1/agent/transactions`
+- Transaction tagging:
+  - `metadata.service_context = "AGENT_CASH"`
+  - `metadata.cash_direction = "deposit"` or `"withdrawal"`
+- Storage model:
+  - Canonical money movement remains in `transactions` and `financial_ledger`
+  - Agent-specific operational projection is written to `agent_transactions`
+  - Agent operational wallet projection is written to `agent_wallets`
+- Business interpretation:
+  - Treated as service-operator cash activity rather than normal retail wallet usage
+  - Supports agent-level visibility for deposit, withdrawal, float, and field activity
+  - Enables commission payout and sponsored-customer tracking
+
+#### Sponsored Customer and Commission Model
+- `service_actor_customer_links` records which merchant or agent onboarded a consumer.
+- Agent-sponsored customers may generate referral commissions for a bounded period configured by admin.
+- Direct agent deposit/withdrawal operations can also generate agent commissions.
+- Commission records are stored in `service_commissions`.
+- Commission payout is executed as a separate immutable transaction sourced from the fee collector node and credited into the actor wallet.
+
+#### Commission Lifecycle (End-to-End)
+
+The current commission engine is designed around agent operations and agent-sponsored consumers.
+
+##### 1. Admin Configures Commission Policy
+
+Commission policy is governed centrally through:
+- `GET /v1/admin/config/commissions`
+- `POST /v1/admin/config/commissions`
+
+Current config shape:
+```json
+{
+  "agent_referral": {
+    "enabled": true,
+    "rate": 0.0025,
+    "fixed_amount": 0,
+    "duration_days": 90
+  },
+  "agent_cash": {
+    "enabled": true,
+    "deposit_rate": 0.001,
+    "deposit_fixed_amount": 0,
+    "withdrawal_rate": 0.0015,
+    "withdrawal_fixed_amount": 0
+  }
+}
+```
+
+**Authoritative Result For Mobile Signup**:
+
+Even when the signup payload does not explicitly ask for it, public mobile
+registration is normalized to:
+
+```json
+{
+  "role": "USER",
+  "registry_type": "CONSUMER"
+}
+```
+
+Promotion to `MERCHANT` or `AGENT` occurs only through the service-access review flow.
+
+##### 2. Agent Registers a Customer
+
+The agent calls:
+- `POST /v1/agent/customers/register`
+
+Example payload:
+```json
+{
+  "full_name": "Asha Mushi",
+  "phone": "+255712345678",
+  "password": "TempPass123!",
+  "currency": "TZS",
+  "language": "sw"
+}
+```
+
+Result:
+- a normal `CONSUMER` identity is created
+- a sponsorship link is written to `service_actor_customer_links`
+- `commission_started_at` is set to now
+- `commission_expires_at` is derived from `agent_referral.duration_days`
+
+Example sponsorship record:
+```json
+{
+  "actor_role": "AGENT",
+  "relationship_type": "agent_registered_customer",
+  "commission_enabled": true,
+  "commission_started_at": "2026-03-24T10:00:00Z",
+  "commission_expires_at": "2026-06-22T10:00:00Z"
+}
+```
+
+##### 3. A Source Transaction Happens
+
+Two commissionable source patterns currently exist:
+
+1. agent cash service activity:
+   - `POST /v1/agent/cash/deposit/settle`
+   - `POST /v1/agent/cash/withdraw/settle`
+
+2. transaction activity by an active agent-sponsored customer:
+   - any canonical consumer transaction that settles while an active sponsorship link exists
+
+The source transaction is still posted to:
+- `transactions`
+- `financial_ledger`
+
+Example source metadata:
+```json
+{
+  "service_context": "AGENT_CASH",
+  "cash_direction": "deposit",
+  "agent_actor_id": "agent-user-uuid"
+}
+```
+
+##### 4. Commission Record Is Created
+
+When the source transaction is posted, the backend evaluates commission policy and writes a record into `service_commissions`.
+
+Possible commission types:
+- `AGENT_CASH`
+- `AGENT_REFERRAL`
+
+Example staged commission record:
+```json
+{
+  "actor_user_id": "agent-user-uuid",
+  "actor_role": "AGENT",
+  "source_transaction_id": "source-tx-uuid",
+  "commission_type": "AGENT_CASH",
+  "amount": 1500,
+  "currency": "TZS",
+  "rate": 0.0015,
+  "fixed_amount": 0,
+  "status": "pending_source_settlement"
+}
+```
+
+If the source transaction is already settled/completed, the commission advances immediately to payout processing.
+
+##### 5. Canonical Source Transaction Settles
+
+When the source transaction reaches `completed` or `settled`, the backend finalizes any pending commission linked to that transaction.
+
+This is important because:
+- commission should not pay out from an unconfirmed source operation
+- payout follows canonical transaction finality
+- commission remains tied to the same immutable ledger lifecycle
+
+##### 6. Commission Payout Is Booked as Its Own Transaction
+
+The payout is not just a status change. It is a new ledger-backed transaction.
+
+Current payout model:
+- source wallet: `FEE_COLLECTOR` system node
+- destination wallet: actor primary wallet
+- transaction metadata:
+  - `service_context = "SERVICE_COMMISSION"`
+  - `commission_id`
+  - `commission_type`
+  - `source_transaction_id`
+
+Example payout metadata:
+```json
+{
+  "service_context": "SERVICE_COMMISSION",
+  "commission_id": "commission-uuid",
+  "commission_type": "AGENT_REFERRAL",
+  "source_transaction_id": "source-tx-uuid",
+  "payout_to_user_id": "agent-user-uuid"
+}
+```
+
+Ledger effect:
+1. `FEE_COLLECTOR` -> `DEBIT`
+2. agent primary wallet -> `CREDIT`
+
+Then `service_commissions` is updated with:
+- `payout_transaction_id`
+- `status = "paid"`
+
+##### 7. Visibility and Audit
+
+Commission visibility endpoints:
+- `GET /v1/agent/commissions`
+- `GET /v1/admin/service-commissions`
+- `GET /v1/admin/service-links`
+
+Operational audit path:
+- source transaction remains in `transactions`
+- payout transaction remains in `transactions`
+- both are independently represented in `financial_ledger`
+- commission business record remains in `service_commissions`
+- sponsorship relationship remains in `service_actor_customer_links`
+
+##### 8. Example Full Scenario
+
+1. Admin sets `agent_referral.rate = 0.0025` and `duration_days = 90`.
+2. Agent registers a new customer on March 24, 2026.
+3. Customer makes a `TZS 100,000` transaction on April 10, 2026.
+4. Backend detects active sponsorship and creates a referral commission:
+   - `100,000 x 0.0025 = 250`
+5. Source transaction completes successfully.
+6. Backend posts a separate commission payout transaction for `TZS 250`.
+7. Agent wallet is credited and the commission record becomes `paid`.
+
+#### Response Shapes
+
+##### `POST /v1/agent/customers/register`
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "consumer-user-uuid",
+      "email": "asha@example.com",
+      "user_metadata": {
+        "full_name": "Asha Mushi",
+        "role": "USER",
+        "registry_type": "CONSUMER"
+      }
+    },
+    "session": null,
+    "linked_customer": {
+      "id": "consumer-user-uuid",
+      "customer_id": "OB26-1234-5678"
+    },
+    "commission_expires_at": "2026-06-22T10:00:00Z"
+  }
+}
+```
+
+##### `GET /v1/agent/customers`
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "link-uuid",
+      "actor_user_id": "agent-user-uuid",
+      "actor_role": "AGENT",
+      "customer_user_id": "consumer-user-uuid",
+      "customer_customer_id": "OB26-1234-5678",
+      "relationship_type": "agent_registered_customer",
+      "status": "active",
+      "commission_enabled": true,
+      "commission_started_at": "2026-03-24T10:00:00Z",
+      "commission_expires_at": "2026-06-22T10:00:00Z",
+      "metadata": {
+        "created_from_role": "AGENT",
+        "channel": "service_actor_registration"
+      },
+      "customer": {
+        "id": "consumer-user-uuid",
+        "full_name": "Asha Mushi",
+        "email": "asha@example.com",
+        "phone": "+255712345678",
+        "customer_id": "OB26-1234-5678",
+        "account_status": "active",
+        "kyc_status": "unverified"
+      }
+    }
+  ]
+}
+```
+
+##### `GET /v1/admin/service-links`
+This endpoint returns the same enriched link shape as `GET /v1/agent/customers`, but can be filtered by:
+- `actorRole`
+- `actorUserId`
+
+##### `GET /v1/agent/commissions`
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "commission-uuid",
+      "actor_user_id": "agent-user-uuid",
+      "actor_role": "AGENT",
+      "customer_user_id": "consumer-user-uuid",
+      "source_transaction_id": "source-tx-uuid",
+      "payout_transaction_id": "payout-tx-uuid",
+      "commission_type": "AGENT_REFERRAL",
+      "amount": 250,
+      "currency": "TZS",
+      "rate": 0.0025,
+      "fixed_amount": 0,
+      "status": "paid",
+      "effective_from": "2026-04-10T12:00:00Z",
+      "effective_until": "2026-06-22T10:00:00Z",
+      "metadata": {
+        "source_transaction_status": "completed",
+        "source_transaction_type": "transfer",
+        "source_context": null,
+        "referral_link_id": "link-uuid"
+      },
+      "created_at": "2026-04-10T12:00:01Z",
+      "updated_at": "2026-04-10T12:00:05Z"
+    }
+  ]
+}
+```
+
+##### `GET /v1/admin/service-commissions`
+This endpoint returns the same commission record shape as `GET /v1/agent/commissions`, but can be filtered by:
+- `actorRole`
+- `actorUserId`
+
+##### `GET /v1/merchant/wallets` and `GET /v1/agent/wallets`
+Both endpoints return projected operational wallet rows, for example:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "projection-wallet-uuid",
+      "owner_user_id": "actor-user-uuid",
+      "base_wallet_id": "canonical-wallet-uuid",
+      "name": "Main Wallet",
+      "wallet_type": "operating",
+      "is_primary": true,
+      "balance": 1250000,
+      "currency": "TZS",
+      "status": "active",
+      "metadata": {
+        "management_tier": "linked",
+        "source_wallet_id": "canonical-wallet-uuid"
+      }
+    }
+  ]
+}
+```
+
+#### Summary Table
+
+| Flow Type | Canonical Ledger | Service Tagging | Operational Projection | Commission Logic |
+| :--- | :--- | :--- | :--- | :--- |
+| Consumer transfer | `transactions` + `financial_ledger` | Optional/general product metadata | Usually none | No service-actor commission |
+| Merchant payment | `transactions` + `financial_ledger` | `service_context = "MERCHANT"` | `merchant_transactions`, `merchant_wallets` | Not enabled by default for customer sponsorship |
+| Agent cash operation | `transactions` + `financial_ledger` | `service_context = "AGENT_CASH"` and `cash_direction` | `agent_transactions`, `agent_wallets` | Yes, direct cash-service and referral commission support |
+
 ---
 
 ## 5. Strategy & System Domains
@@ -708,6 +1213,7 @@ The API returns standard HTTP status codes along with a JSON error object: `{ "s
 curl -X POST https://orbi-financial-technologies-c0re-v2026.onrender.com/v1/auth/login \
   -H "Content-Type: application/json" \
   -H "x-orbi-app-id: mobile-android" \
+  -H "x-orbi-app-origin: ORBI_MOBILE_V2026" \
   -d '{
     "e": "user@orbi.io",
     "p": "SecurePass123!"
@@ -741,7 +1247,8 @@ curl -X POST https://orbi-financial-technologies-c0re-v2026.onrender.com/v1/auth
 ```bash
 curl -X GET https://orbi-financial-technologies-c0re-v2026.onrender.com/v1/user/profile \
   -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>" \
-  -H "x-orbi-app-id: mobile-android"
+  -H "x-orbi-app-id: mobile-android" \
+  -H "x-orbi-app-origin: ORBI_MOBILE_V2026"
 ```
 
 ### 8.3 System Health Check

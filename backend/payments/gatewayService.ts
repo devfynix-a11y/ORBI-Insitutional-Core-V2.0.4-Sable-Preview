@@ -5,7 +5,7 @@ import { ProviderFactory } from './providers/ProviderFactory.js';
 /**
  * ORBI EXTERNAL GATEWAY SERVICE (V3.0)
  * ------------------------------
- * Orchestrator node using Intelligent Factory selection.
+ * Orchestrator node using provider-registry driven execution.
  */
 class GatewayService {
     
@@ -13,7 +13,7 @@ class GatewayService {
      * INITIATE STK PUSH (CASH-IN)
      */
     public async initiateStkPush(partner: FinancialPartner, phone: string, amount: number, reference: string) {
-        // Factory now selects the node logic based on partner metadata
+        // ProviderFactory now resolves the registry-backed adapter for this partner.
         const providerNode = ProviderFactory.getProvider(partner);
         
         const response = await providerNode.stkPush(partner, phone, amount, reference);

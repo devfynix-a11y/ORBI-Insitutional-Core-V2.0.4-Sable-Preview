@@ -604,6 +604,22 @@ export class TransactionService {
         if (status === 'completed' || status === 'settled') {
             const balance = await this.calculateBalanceFromLedger(tx.wallet_id);
             SocketRegistry.notifyBalanceUpdate(tx.user_id, tx.wallet_id, balance);
+
+            if (oldStatus !== 'completed' && oldStatus !== 'settled') {
+                try {
+                    const { BankingEngine } = await import('../backend/ledger/transactionEngine.js');
+                    await BankingEngine.sendTransferNotifications(id, { ...tx, status, status_notes: notes });
+                } catch (e: any) {
+                    console.error(`[Ledger] Participant notification dispatch failed for ${id}: ${e.message}`);
+                }
+            }
+        }
+
+        try {
+            const { ServiceActorOps } = await import('../backend/features/ServiceActorOps.js');
+            await ServiceActorOps.handleTransactionStatusChange(id, status);
+        } catch (e: any) {
+            console.error(`[Ledger] Service actor post-status sync failed for ${id}: ${e.message}`);
         }
     }
 

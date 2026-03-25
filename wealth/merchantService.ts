@@ -3,6 +3,9 @@ import { getSupabase } from '../services/supabaseClient.js';
 import { DigitalMerchant, MerchantCategory } from '../types.js';
 
 export class MerchantService {
+    private shouldUseMockFallback(): boolean {
+        return process.env.NODE_ENV !== 'production';
+    }
     
     /**
      * Fetch all available merchant categories
@@ -25,7 +28,7 @@ export class MerchantService {
      */
     public async getMerchants(category?: MerchantCategory): Promise<DigitalMerchant[]> {
         const sb = getSupabase();
-        if (!sb) return this.getMockMerchants(category);
+        if (!sb) return this.shouldUseMockFallback() ? this.getMockMerchants(category) : [];
 
         let query = sb.from('merchants').select('*').eq('status', 'ACTIVE');
         
@@ -34,7 +37,7 @@ export class MerchantService {
         }
 
         const { data, error } = await query;
-        if (error || !data) return this.getMockMerchants(category);
+        if (error || !data) return this.shouldUseMockFallback() ? this.getMockMerchants(category) : [];
 
         return data as DigitalMerchant[];
     }
@@ -44,9 +47,12 @@ export class MerchantService {
      */
     public async getMerchant(id: string): Promise<DigitalMerchant | null> {
         const sb = getSupabase();
-        if (!sb) return this.getMockMerchants().find(m => m.id === id) || null;
+        if (!sb) return this.shouldUseMockFallback() ? this.getMockMerchants().find(m => m.id === id) || null : null;
 
         const { data } = await sb.from('merchants').select('*').eq('id', id).single();
+        if (!data) {
+            return this.shouldUseMockFallback() ? this.getMockMerchants().find(m => m.id === id) || null : null;
+        }
         return data as DigitalMerchant;
     }
 

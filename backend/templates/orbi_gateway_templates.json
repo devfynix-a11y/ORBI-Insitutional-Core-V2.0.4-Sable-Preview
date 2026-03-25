@@ -317,5 +317,299 @@
         "text": "ORBI Financial Technologies"
       }
     ]
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Merchant update: {{status}} payment of {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Taarifa ya merchant: malipo ya {{currency}} {{amount}} katika {{actorLabel}} yako katika hali ya {{status}}."
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Merchant payment {{status}}: {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Malipo ya merchant {{status}}: {{currency}} {{amount}} katika {{actorLabel}}."
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Merchant payment update: {{status}} payment of {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Merchant_Service_Update",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Taarifa ya malipo ya merchant: malipo ya {{currency}} {{amount}} katika {{actorLabel}} yako yapo kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Agent {{direction}} update: {{status}} amount {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Taarifa ya agent {{direction}}: kiasi cha {{currency}} {{amount}} katika {{actorLabel}} yako kiko kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Agent {{direction}} {{status}}: {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Agent {{direction}} {{status}}: {{currency}} {{amount}} katika {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Agent {{direction}} update: {{status}} amount {{currency}} {{amount}} in {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Cash_Update",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Taarifa ya agent {{direction}}: kiasi cha {{currency}} {{amount}} katika {{actorLabel}} yako kiko kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Your payment of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Malipo yako ya {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Your payment of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Malipo yako ya {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Your payment of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Merchant_Customer_Payment_Update",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Malipo yako ya {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Your {{direction}} request of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Ombi lako la {{direction}} la {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Your {{direction}} request of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Ombi lako la {{direction}} la {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Your {{direction}} request of {{currency}} {{amount}} through {{actorLabel}} is {{status}}."
+  },
+  {
+    "name": "Agent_Customer_Cash_Update",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Ombi lako la {{direction}} la {{currency}} {{amount}} kupitia {{actorLabel}} yako kwenye hali ya {{status}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Commission paid: {{currency}} {{amount}} has been credited to {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Kamisheni imelipwa: {{currency}} {{amount}} imeingizwa kwenye {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Commission paid: {{currency}} {{amount}} credited to {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kamisheni imelipwa: {{currency}} {{amount}} imeingizwa kwenye {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Commission paid: {{currency}} {{amount}} has been credited to {{actorLabel}}."
+  },
+  {
+    "name": "Agent_Commission_Paid",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Kamisheni imelipwa: {{currency}} {{amount}} imeingizwa kwenye {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. {{customerName}} was registered successfully through {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. {{customerName}} amesajiliwa kwa mafanikio kupitia {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "{{customerName}} was registered successfully through {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "{{customerName}} amesajiliwa kwa mafanikio kupitia {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. {{customerName}} was registered successfully through {{actorLabel}}."
+  },
+  {
+    "name": "Service_Customer_Registered",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. {{customerName}} amesajiliwa kwa mafanikio kupitia {{actorLabel}}."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "sms",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nRef: {{refId}}. Your ORBI service access has been approved. {{actorLabel}} is now enabled."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "sms",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "ORBI Financial Technologies:\n\nKumb: {{refId}}. Ufikiaji wako wa huduma za ORBI umeidhinishwa. {{actorLabel}} sasa imewezeshwa."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "push",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Your ORBI service access has been approved. {{actorLabel}} is now enabled."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "push",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Ufikiaji wako wa huduma za ORBI umeidhinishwa. {{actorLabel}} sasa imewezeshwa."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "email",
+    "language": "en",
+    "messageType": "transactional",
+    "body": "Ref: {{refId}}. Your ORBI service access has been approved. {{actorLabel}} is now enabled."
+  },
+  {
+    "name": "Service_Access_Approved",
+    "channel": "email",
+    "language": "sw",
+    "messageType": "transactional",
+    "body": "Kumb: {{refId}}. Ufikiaji wako wa huduma za ORBI umeidhinishwa. {{actorLabel}} sasa imewezeshwa."
   }
 ]

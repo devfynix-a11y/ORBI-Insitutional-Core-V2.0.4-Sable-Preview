@@ -11,18 +11,28 @@ export const ALLOWED_DOMAINS = [
     '127.0.0.1'
 ];
 
+const ALLOWED_IOS_BUNDLE_IDS = (process.env.ORBI_IOS_BUNDLE_IDS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
 const TRUSTED_APP_ORIGINS = [
     process.env.ORBI_MOBILE_ORIGIN,
+    process.env.ORBI_WEB_ORIGIN,
     process.env.ORBI_CORE_APP_ORIGIN,
     'ORBI_MOBILE_V2026',
+    'ORBI_INSTITUTIONAL_CORE_V2026',
     'OBI_INSTITUTIONAL_CORE_V25',
     'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
 
 const TRUSTED_APP_IDS = [
     process.env.ORBI_MOBILE_APP_ID,
+    process.env.ORBI_WEB_APP_ID,
     process.env.ORBI_CORE_APP_ID,
     'mobile-android',
+    'mobile-ios',
+    'ORBI_INSTITUTIONAL_CORE_V2026',
     'OBI_INSTITUTIONAL_CORE_V25',
     'DPS_INSTITUTIONAL_CORE_V25',
 ].filter((value): value is string => Boolean(value && value.trim()));
@@ -43,6 +53,12 @@ const resolveTrustedAppRequest = (
     };
 };
 
+const isTrustedIosBundleOrigin = (origin: string) => {
+    if (!origin.startsWith('ios:bundle-id:')) return false;
+    const bundleId = origin.replace('ios:bundle-id:', '').trim();
+    return bundleId.length > 0 && ALLOWED_IOS_BUNDLE_IDS.includes(bundleId);
+};
+
 /**
  * APP TRUST MIDDLEWARE
  * --------------------
@@ -50,8 +66,30 @@ const resolveTrustedAppRequest = (
  * signed Android/iOS applications.
  */
 export const appTrustMiddleware = (req: Request, res: Response, next: NextFunction) => {
+    const protectedPrefixes = [
+        '/api',
+        '/v1',
+        '/auth',
+        '/user',
+        '/wallets',
+        '/transactions',
+        '/goals',
+        '/categories',
+        '/tasks',
+        '/notifications',
+        '/fx',
+        '/escrow',
+        '/merchants',
+        '/receipt',
+        '/sys',
+        '/sandbox',
+    ];
+    const isProtectedApiPath = protectedPrefixes.some(
+        (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
+    );
+
     // 1. Skip for non-API routes (assets, static files)
-    if (!req.path.startsWith('/api')) return next();
+    if (!isProtectedApiPath) return next();
     
     // 2. Skip for health checks and public telemetry
     if (req.path === '/health' || req.path === '/api/health' || req.path === '/api/broker/health') {
@@ -105,8 +143,8 @@ export const appTrustMiddleware = (req: Request, res: Response, next: NextFuncti
         }
     }
 
-    // 6. Check iOS Bundle Trust (Placeholder)
-    if (origin.startsWith('ios:bundle-id:')) {
+    // 6. Check iOS Bundle Trust
+    if (isTrustedIosBundleOrigin(origin)) {
         return next(); 
     }
 

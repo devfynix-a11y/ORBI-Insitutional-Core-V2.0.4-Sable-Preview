@@ -9,9 +9,23 @@ if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
 const FINAL_SECRET = JWT_SECRET || "secure-bank-secret-key-dev";
 
 export class SessionService {
-    createSession(userId: string, deviceId?: string) {
+    createSession(
+        userId: string,
+        deviceId?: string,
+        claims: {
+            role?: string;
+            app_origin?: string;
+            registry_type?: string;
+            email?: string;
+        } = {},
+    ) {
         return jwt.sign(
-            { userId, deviceId },
+            {
+                userId,
+                deviceId,
+                type: 'access',
+                ...claims,
+            },
             FINAL_SECRET,
             { expiresIn: "15m" }
         );

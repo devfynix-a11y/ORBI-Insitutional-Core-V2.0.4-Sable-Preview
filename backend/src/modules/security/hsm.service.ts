@@ -1,4 +1,12 @@
 import jwt from 'jsonwebtoken';
+import { JWTNode } from '../../../security/jwt.js';
+
+type SecureAccessTokenClaims = {
+    role?: string;
+    app_origin?: string;
+    registry_type?: string;
+    email?: string;
+};
 
 export class HSMService {
     /**
@@ -6,6 +14,9 @@ export class HSMService {
      * like AWS CloudHSM or Google Cloud KMS.
      */
     async signWithHSM(payload: string): Promise<string> {
+        if (process.env.NODE_ENV === 'production') {
+            throw new Error('HSM_MOCK_DISABLED_IN_PRODUCTION');
+        }
         console.log(`[HSM] Sending payload to Hardware Security Module for signing...`);
         // In production, this would make an RPC/API call to the KMS/HSM provider
         // returning a cryptographically secure signature.
@@ -15,22 +26,22 @@ export class HSMService {
     /**
      * Generates an RS256 JWT where the private key is stored securely in an HSM.
      */
-    async generateSecureToken(userId: string, deviceId: string): Promise<string> {
-        console.log(`[HSM] Requesting RS256 JWT generation from HSM for user ${userId}...`);
-        
-        // Mocking the RS256 token generation. In reality, the HSM signs the JWT header + payload.
-        // We use a dummy secret here just for the skeleton to compile and run.
-        const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-        const payload = Buffer.from(JSON.stringify({ 
-            sub: userId, 
-            device: deviceId, 
-            iat: Math.floor(Date.now() / 1000), 
-            exp: Math.floor(Date.now() / 1000) + (15 * 60) // 15 minutes 
-        })).toString('base64url');
-
-        const signature = await this.signWithHSM(`${header}.${payload}`);
-        
-        return `${header}.${payload}.${signature}`;
+    async generateSecureToken(
+        userId: string,
+        deviceId: string,
+        claims: SecureAccessTokenClaims = {},
+    ): Promise<string> {
+        console.log(`[HSM] Generating secure session token for user ${userId}...`);
+        return JWTNode.sign(
+            {
+                sub: userId,
+                device: deviceId,
+                type: 'access',
+                issuer: 'orbi-hsm-bridge',
+                ...claims,
+            },
+            15 * 60,
+        );
     }
 }
 

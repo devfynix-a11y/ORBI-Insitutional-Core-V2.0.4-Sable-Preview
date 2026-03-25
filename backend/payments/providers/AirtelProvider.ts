@@ -13,10 +13,16 @@ export class AirtelProvider implements IPaymentProvider {
     
     public async authenticate(partner: FinancialPartner): Promise<string> {
         if (partner.token_cache && partner.token_expiry && partner.token_expiry > Date.now()) {
-            return partner.token_cache;
+            const cachedToken = await DataVault.decrypt(partner.token_cache);
+            if (typeof cachedToken === 'string' && cachedToken.trim().length > 0) {
+                return cachedToken;
+            }
         }
 
         const secret = await DataVault.decrypt(partner.client_secret || '');
+        if (!secret || typeof secret !== 'string') {
+            throw new Error('AIRTEL_SECRET_MISSING');
+        }
         
         console.info(`[Airtel] Handshake initiated for ${partner.name}`);
         

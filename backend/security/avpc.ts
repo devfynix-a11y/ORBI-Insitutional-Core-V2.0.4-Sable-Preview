@@ -57,7 +57,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
         direction: 'INGRESS',
         service: 'wealth-service',
         identity: {
-            roles: ['USER', 'SYSTEM', 'SUPER_ADMIN'],
+            roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT', 'SYSTEM', 'SUPER_ADMIN'],
             permissions: ['wallet.debit']
         },
         payload: {
@@ -70,7 +70,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
         policy_id: 'ext_api_v1',
         priority: 20, direction: 'INGRESS', service: 'gateway',
         identity: { 
-            roles: ['USER', 'SYSTEM'], 
+            roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT', 'SYSTEM'], 
             permissions: ['user.read'],
             allowed_scopes: ['read:profile', 'read:accounts']
         },
@@ -79,7 +79,7 @@ export const POLICIES: Record<string, AVPCPolicy> = {
     'high_value_settlement': {
         policy_id: 'fin_whale_alert_v1',
         priority: 80, direction: 'INGRESS', service: 'wealth-service', operation: 'WRITE',
-        identity: { roles: ['USER'], permissions: ['wallet.debit'] },
+        identity: { roles: ['USER', 'CONSUMER', 'MERCHANT', 'AGENT'], permissions: ['wallet.debit'] },
         payload: { max_amount: 50000 },
         decision: 'CHALLENGE' 
     }

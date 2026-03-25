@@ -11,6 +11,7 @@ import { Messaging } from '../backend/features/MessagingService.js';
 import { ProvisioningService } from '../backend/features/ProvisioningService.js';
 import { WalletService } from '../wealth/walletService.js';
 import { parsePhoneNumber } from 'libphonenumber-js';
+import { JWTNode } from '../backend/security/jwt.js';
 
 /**
  * ORBI AUTHENTICATION PROTOCOL (V24.5 Titanium Hardened)
@@ -27,6 +28,9 @@ import { BruteForceService } from '../backend/src/services/bruteForce.service.js
 export class AuthService {
     private security = new SecurityService();
     private bruteForce = new BruteForceService();
+    private readonly allowLocalSessionFallback =
+        process.env.NODE_ENV !== 'production' &&
+        process.env.ORBI_ALLOW_LOCAL_SESSION_FALLBACK === 'true';
 
     private hashToken(token: string): string {
         return createHash('sha256').update(token).digest('hex');
@@ -87,6 +91,27 @@ export class AuthService {
             case 'ACCOUNTANT': return [...common, 'wallet.read', 'transaction.view', 'ledger.read', 'ledger.write'];
             case 'IT': return [...common, 'admin.audit.read', 'system.wallet.credit', 'system.wallet.debit'];
             case 'CUSTOMER_CARE': return [...common, 'transaction.view', 'user.read'];
+            case 'MERCHANT':
+                return [
+                    ...common,
+                    'wallet.read',
+                    'transaction.create',
+                    'transaction.view',
+                    'merchant.read',
+                    'merchant.create',
+                    'merchant.update',
+                    'merchant.settlement',
+                ];
+            case 'AGENT':
+                return [
+                    ...common,
+                    'wallet.read',
+                    'transaction.create',
+                    'transaction.view',
+                    'agent.cash.deposit',
+                    'agent.cash.withdraw',
+                    'agent.float.manage',
+                ];
             case 'CONSUMER':
             case 'USER':
                 return [...common, 'wallet.read', 'wallet.create', 'wallet.update', 'wallet.delete', 'transaction.create', 'transaction.view', 'goal.read', 'goal.create', 'goal.update', 'goal.delete', 'category.read', 'category.create', 'category.update', 'category.delete', 'task.read', 'task.create', 'task.update', 'task.delete'];
@@ -94,7 +119,10 @@ export class AuthService {
         }
     }
 
-    private async resolveNodeStatus(userId: string, registryType: 'STAFF' | 'CONSUMER' = 'STAFF'): Promise<{ status: string, kyc_level: number, kyc_status: string, id_type?: string, id_number?: string }> {
+    private async resolveNodeStatus(
+        userId: string,
+        registryType: 'STAFF' | 'CONSUMER' | 'MERCHANT' | 'AGENT' = 'STAFF',
+    ): Promise<{ status: string, kyc_level: number, kyc_status: string, id_type?: string, id_number?: string }> {
         const sb = getAdminSupabase();
         
         // 1. Supabase Check
@@ -140,11 +168,14 @@ export class AuthService {
         // Handle both full session object (from login) and user-only object (from getUser)
         const user = sbSession.user || sbSession;
         const meta = user.user_metadata || {};
-        const AUTHORIZED_ORIGIN = 'OBI_INSTITUTIONAL_CORE_V25';
+        const AUTHORIZED_ORIGIN =
+            process.env.ORBI_WEB_ORIGIN ||
+            process.env.ORBI_CORE_APP_ORIGIN ||
+            'ORBI_INSTITUTIONAL_CORE_V2026';
         
         // HARDENING: Cluster Origin Enforcement
         const origin = meta.app_origin;
-        const ALLOWED_ORIGINS = [AUTHORIZED_ORIGIN, 'DPS_INSTITUTIONAL_CORE_V25', 'OBI_MOBILE_V1', 'ORBI_MOBILE_V2026'];
+        const ALLOWED_ORIGINS = [AUTHORIZED_ORIGIN, 'ORBI_INSTITUTIONAL_CORE_V2026', 'DPS_INSTITUTIONAL_CORE_V25', 'OBI_INSTITUTIONAL_CORE_V25', 'OBI_MOBILE_V1', 'ORBI_MOBILE_V2026'];
         
         if (origin && !ALLOWED_ORIGINS.includes(origin)) {
             throw new Error(`ACCESS_DENIED: Identity node originates from unauthorized cluster [${origin}].`);
@@ -194,6 +225,7 @@ export class AuthService {
     
     async getSession(token?: string): Promise<Session | null> {
         const sb = getSupabase();
+        const adminSb = getAdminSupabase();
         
         // 1. Validate provided token against Supabase Auth
         if (sb && token) {
@@ -216,13 +248,46 @@ export class AuthService {
             }
         }
 
-        // 2. Fallback to local storage (Legacy/Testing/Client-Side)
-        const local = Storage.getItem(STORAGE_KEYS.USER_SESSION);
-        if (local) {
-            try {
-                const s = JSON.parse(local) as Session;
-                if (s.exp > Date.now() / 1000) return s;
-            } catch (e) { Storage.removeItem(STORAGE_KEYS.USER_SESSION); }
+        // 1b. Validate internally signed access tokens
+        if (token) {
+            type InternalAccessPayload = {
+                sub: string;
+                device?: string;
+                exp?: number;
+                jti?: string;
+                type?: string;
+            };
+
+            const payload = await JWTNode.verify<InternalAccessPayload>(token);
+            if (payload?.sub && (!payload.type || payload.type === 'access') && adminSb) {
+                try {
+                    const { data: userData } = await adminSb.auth.admin.getUserById(payload.sub);
+                    const authUser = userData?.user;
+                    if (authUser) {
+                        const sessionData = {
+                            access_token: token,
+                            token_type: 'Bearer',
+                            user: authUser,
+                            expires_at: payload.exp || Math.floor(Date.now() / 1000) + 900,
+                        };
+                        return await this.mapSession(sessionData);
+                    }
+                } catch (e: any) {
+                    console.error("[AuthService] Internal JWT session resolution failed:", e);
+                    return null;
+                }
+            }
+        }
+
+        // 2. Fallback to local storage (Legacy/Testing only)
+        if (this.allowLocalSessionFallback) {
+            const local = Storage.getItem(STORAGE_KEYS.USER_SESSION);
+            if (local) {
+                try {
+                    const s = JSON.parse(local) as Session;
+                    if (s.exp > Date.now() / 1000) return s;
+                } catch (e) { Storage.removeItem(STORAGE_KEYS.USER_SESSION); }
+            }
         }
         return null;
     }
@@ -526,15 +591,55 @@ export class AuthService {
         return { session: mapped };
     }
 
-    async logout(token?: string) {
+    async logout(token?: string, refreshToken?: string) {
         const sb = getSupabase();
-        if (sb) {
-            const { data: { user } } = await sb.auth.getUser();
-            if (user) {
-                await Audit.log('IDENTITY', user.id, 'LOGOUT', { email: user.email });
-            }
-            await sb.auth.signOut().catch(() => {});
+        const adminSb = getAdminSupabase();
+
+        if (refreshToken && sb) {
+            const tokenHash = this.hashToken(refreshToken);
+            await sb.from('user_sessions')
+                .update({ is_revoked: true })
+                .eq('refresh_token_hash', tokenHash);
         }
+
+        let resolvedUserId: string | null = null;
+        let resolvedEmail: string | null = null;
+
+        if (token && sb) {
+            const { data: { user } } = await sb.auth.getUser(token);
+            if (user) {
+                resolvedUserId = user.id;
+                resolvedEmail = user.email || null;
+            }
+        }
+
+        if (!resolvedUserId && token) {
+            const payload = await JWTNode.verify<{ sub?: string; jti?: string; type?: string }>(token);
+            if (payload?.jti) {
+                await JWTNode.revoke(payload.jti);
+            }
+            if (payload?.sub) {
+                resolvedUserId = payload.sub;
+                if (adminSb) {
+                    const { data } = await adminSb.auth.admin.getUserById(payload.sub);
+                    resolvedEmail = data?.user?.email || null;
+                }
+            }
+        }
+
+        if (resolvedUserId && sb) {
+            await sb.from('user_sessions')
+                .update({ is_revoked: true })
+                .eq('user_id', resolvedUserId);
+        }
+
+        if (resolvedUserId) {
+            await Audit.log('IDENTITY', resolvedUserId, 'LOGOUT', { email: resolvedEmail });
+            if (adminSb) {
+                await adminSb.auth.admin.signOut(resolvedUserId).catch(() => {});
+            }
+        }
+
         Storage.removeItem(STORAGE_KEYS.USER_SESSION);
     }
 
@@ -578,17 +683,35 @@ export class AuthService {
                 
                 // HARDENING: Role & Registry Enforcement based on Origin
                 let role: UserRole = 'USER';
-                let registryType = 'CONSUMER';
+                let registryType: 'STAFF' | 'CONSUMER' | 'MERCHANT' | 'AGENT' = 'CONSUMER';
                 const origin = m?.app_origin;
+                const requestedRole = (m?.role as UserRole) || 'USER';
+                const staffRoles: UserRole[] = [
+                    'SUPER_ADMIN',
+                    'ADMIN',
+                    'IT',
+                    'AUDIT',
+                    'ACCOUNTANT',
+                    'CUSTOMER_CARE',
+                    'HUMAN_RESOURCE',
+                ];
 
                 if (origin === 'OBI_MOBILE_V1' || origin === 'ORBI_MOBILE_V2026') {
-                    // Mobile App Users are strictly CONSUMERS
-                    role = 'CONSUMER';
+                    // Mobile app signups start as ordinary public users.
+                    // Merchant/agent access is granted later through ORBI review.
+                    role = 'USER';
                     registryType = 'CONSUMER';
-                } else if (origin === 'OBI_INSTITUTIONAL_CORE_V25' || origin === 'DPS_INSTITUTIONAL_CORE_V25') {
-                    // Institutional Users (Staff) - Role must be provided, default to USER if not
-                    role = (m?.role as UserRole) || 'USER'; 
-                    registryType = 'STAFF';
+                } else if (origin === 'ORBI_INSTITUTIONAL_CORE_V2026' || origin === 'OBI_INSTITUTIONAL_CORE_V25' || origin === 'DPS_INSTITUTIONAL_CORE_V25') {
+                    role = requestedRole;
+                    if (staffRoles.includes(requestedRole)) {
+                        registryType = 'STAFF';
+                    } else if (requestedRole === 'MERCHANT') {
+                        registryType = 'MERCHANT';
+                    } else if (requestedRole === 'AGENT') {
+                        registryType = 'AGENT';
+                    } else {
+                        registryType = 'CONSUMER';
+                    }
                 } else {
                     // Default fallback for unknown origins
                     role = 'USER';
@@ -744,7 +867,7 @@ export class AuthService {
                 email: user.email,
                 user_metadata: { 
                     ...user.user_metadata, 
-                    app_origin: user.user_metadata?.app_origin || 'OBI_INSTITUTIONAL_CORE_V25' 
+                    app_origin: user.user_metadata?.app_origin || 'ORBI_INSTITUTIONAL_CORE_V2026' 
                 },
                 role: (user.user_metadata?.role || 'USER') as UserRole
             },
@@ -835,7 +958,7 @@ export class AuthService {
                 email: user.email,
                 user_metadata: { 
                     ...user, 
-                    app_origin: user.app_origin || 'OBI_INSTITUTIONAL_CORE_V25' 
+                    app_origin: user.app_origin || 'ORBI_INSTITUTIONAL_CORE_V2026' 
                 },
                 role: user.role || 'USER'
             },

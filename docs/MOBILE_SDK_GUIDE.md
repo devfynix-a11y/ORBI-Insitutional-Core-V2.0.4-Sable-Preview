@@ -12,7 +12,7 @@ The **ORBI Mobile SDK** connects your application to the **Sovereign Backend Nod
 ### 1.1 Base Configuration
 *   **API Endpoint**: `https://orbi-financial-technologies-c0re-v2026.onrender.com`
 *   **WebSocket Endpoint**: `wss://orbi-financial-technologies-c0re-v2026.onrender.com/nexus-stream`
-*   **App Identity**: You must include `x-orbi-app-id`, `x-orbi-app-origin`, and `x-orbi-apk-hash` (for Android) in every request. Consumer/mobile builds use `mobile-android` + `ORBI_MOBILE_V2026`; institutional/core builds use `OBI_INSTITUTIONAL_CORE_V25` or `DPS_INSTITUTIONAL_CORE_V25` with the matching origin.
+*   **App Identity**: You must include `x-orbi-app-id`, `x-orbi-app-origin`, and `x-orbi-apk-hash` (for Android) in every request. Consumer/mobile builds use `mobile-android` or `mobile-ios` with `ORBI_MOBILE_V2026`; institutional/core builds use `OBI_INSTITUTIONAL_CORE_V25` or `DPS_INSTITUTIONAL_CORE_V25` with the matching origin.
 
 ---
 
@@ -34,7 +34,7 @@ const registerUser = async (userData) => {
     nationality: "Tanzania",
     currency: "TZS",
     metadata: {
-      app_origin: "OBI_MOBILE_V1" // REQUIRED: Identifies this as a Mobile User
+      app_origin: "ORBI_MOBILE_V2026" // REQUIRED: Identifies this as a Mobile User
     }
   };
 
@@ -48,6 +48,7 @@ const registerUser = async (userData) => {
 ```
 
 **Note**: `customer_id` is automatically generated (e.g., `OB26-1234-5678`) if you don't send it. The format is `FN{YY}-{RAND4}-{RAND4}`.
+Legacy note: `OBI_MOBILE_V1` is still accepted by older auth paths for backward compatibility, but new consumer/mobile clients should use `ORBI_MOBILE_V2026`.
 
 ### 2.2 Login & Session Management
 **Endpoint**: `POST /v1/auth/login`
@@ -253,9 +254,9 @@ To protect the Sovereign Node from unauthorized clients, the backend enforces **
 ### 5.1 Mandatory Request Headers
 Every request from the official Android app must include the following headers:
 
-*   `x-orbi-app-id`: Identifies the client cluster (e.g., `mobile-android`).
+*   `x-orbi-app-id`: Identifies the client cluster (e.g., `mobile-android` or `mobile-ios`).
 *   `x-orbi-app-origin`: Identifies the application origin (e.g., `ORBI_MOBILE_V2026`).
-*   `x-orbi-apk-hash`: The **Base64-encoded SHA-256 fingerprint** of your signing certificate.
+*   `x-orbi-apk-hash`: The **Base64-encoded SHA-256 fingerprint** of your Android signing certificate. Android requests must include it; iOS requests should not.
 
 Requests from Android without these headers (or with a mismatching hash) are rejected with `403 Forbidden`.
 
@@ -277,7 +278,7 @@ When performing biometric authentication, the Android OS automatically attaches 
 ## 6. Security Best Practices
 
 1.  **SSL Pinning**: Pin the server certificate to prevent Man-in-the-Middle attacks.
-2.  **Official App Verification**: Always include the `x-orbi-apk-hash` header in REST calls.
+2.  **Official App Verification**: Android REST calls must include the `x-orbi-apk-hash` header. iOS clients should rely on the trusted mobile app identity headers instead.
 3.  **Biometrics**: Use local biometrics (FaceID/TouchID) to guard the `access_token`.
 4.  **Root Detection**: The API may reject requests from rooted/jailbroken devices (Sentinel Check).
 5.  **Rate Limiting**: Do not poll endpoints. Use WebSockets for updates.
